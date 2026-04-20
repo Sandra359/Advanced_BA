@@ -7,45 +7,45 @@ import torch
 import torch.nn as nn
 import torch_geometric.nn as gnn
 import matplotlib.pyplot as plt
-
+import sys
 
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2025
 START = "2019-01-01T00:00:00.000Z"
-END   = "2026-02-01T00:00:00.000Z"
+END   = "2020-02-01T00:00:00.000Z"
 
-df_prices = helper.fetch_all(helper.get_nps_prices, START, END, BASE)
-df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END, BASE)
-df_system = helper.fetch_all(helper.get_system_production, START, END, BASE)
+df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
+df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
+df_system = helper.fetch_all(helper.get_system_production, START, END)
 
 # --- 3. standardize to hourly, then daily ---
 
-df_prices_daily  = df_prices.resample("h").mean()
-df_flows_daily   = df_flows.resample("h").mean()
-df_system_daily  = df_system.resample("h").mean()
+df_prices_hourly  = df_prices.resample("h").mean() # The data is mostly per 15 minutes and some are hourly
+df_flows_hourly   = df_flows.resample("h").mean().fillna(0) # The data is only hourly but resampling to be sure for alignment
+df_system_hourly  = df_system.resample("h").mean() # Mostly per 5 minutes, some entries are 0:00 (maybe missing?) and 5 minutes
 
 # --- 4. merge into one wide dataframe ---
 
 df_daily = pd.concat([
-    df_prices_daily.add_prefix("price_"),
-    df_flows_daily.add_prefix("flow_"),
-    df_system_daily.add_prefix("system_"),
+    df_prices_hourly.add_prefix("price_"),
+    df_flows_hourly.add_prefix("flow_"),
+    df_system_hourly.add_prefix("system_"),
 ], axis=1).sort_index()
 
-print(f"\nMissing values:\n{df_daily.isna().sum()}")
+print(f"\nMissing values:\n{df_daily.isna().sum()}") 
 
-df_daily = df_daily.dropna(how="all")
 
-# ==================================================
-# ST-GNN: ESTONIAN ENERGY RESILIENCE MODEL
-# Target: True energy balance (production + imports - consumption)
+flow_cols = [col for col in df_daily.columns if col.startswith("flow_")]
+df_daily[flow_cols] = df_daily[flow_cols].fillna(0)
+df_daily = df_daily.dropna(how="all") # Thinking about imputing them
+
+
+# Target: True available energy in Estonia = production + imports
 # Scenarios: S1 = full grid, S2 = full isolation, S3 = isolated + wind (TBD)
-# ==================================================
 
-
-prices_h = df_prices_daily.copy()
-flows_h  = df_flows_daily.copy()
-system_h = df_system_daily.copy()
+prices_h = df_prices_hourly.copy()
+flows_h  = df_flows_hourly.copy()
+system_h = df_system_hourly.copy()
 
 idx      = prices_h.index
 flows_h  = flows_h.reindex(idx, method="ffill")
@@ -53,17 +53,22 @@ system_h = system_h.reindex(idx, method="ffill")
 
 # True energy balance: production + all imports - consumption
 # Positive = surplus, Negative = real deficit even after imports
-system_h["gross_supply_input"] = (
+system_h["available_energy"] = (
     system_h["production"]
-    + flows_h[("ee", "fi")]
-    + flows_h[("ee", "lv")]
-)
+    - flows_h[("ee", "fi")]
+    - flows_h[("ee", "lv")] 
+    - flows_h[("ee", "ru_narva")]
+    - flows_h[("ee", "ru_pihkva")]
+) # available energy = energy produced in 
 
-print(f"    Mean: {system_h['gross_supply_input'].mean():+.1f} MW")
-print(f"    Std:  {system_h['gross_supply_input'].std():.1f} MW")
-print(f"    Min:  {system_h['gross_supply_input'].min():+.1f} MW")
-print(f"    Max:  {system_h['gross_supply_input'].max():+.1f} MW")
-print(f"    True deficit hours: {(system_h['gross_supply_input'] < 0).sum()}")
+
+print(f"    Mean: {system_h['available_energy'].mean():+.1f} MW")
+print(f"    Std:  {system_h['available_energy'].std():.1f} MW")
+print(f"    Min:  {system_h['available_energy'].min():+.1f} MW")
+print(f"    Max:  {system_h['available_energy'].max():+.1f} MW")
+print(f"    Hours without enough energy: {(system_h['available_energy'] < 0).sum()}")
+
+sys.exit(0)
 
 # Calendar features (sine/cosine encoding — avoids treating Mon=1, Sun=7 as numeric)
 hour_sin  = np.sin(2 * np.pi * idx.hour / 24)
@@ -73,12 +78,12 @@ dow_cos   = np.cos(2 * np.pi * idx.dayofweek / 7)
 month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12)
 month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
-# Frequency deviation from 50 Hz — real-time grid stress signal
+# Frequency deviation from 50 Hz — real-time grid stress signal -- research later
 freq_deviation = (system_h["frequency"] - 50.0).fillna(0)
 
 # EE node: full feature set
 ee_feats = pd.DataFrame({
-    "gross_supply_input":   system_h["gross_supply_input"],
+    "available_energy":   system_h["available_energy"],
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
     "consumption":          system_h["consumption"],
