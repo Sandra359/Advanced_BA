@@ -37,8 +37,8 @@ def get_cross_border_flows(start: str, end: str, BASE=BASE) -> pd.DataFrame:
     df = df.set_index("timestamp").sort_index()
 
     # Keep only relevant cross-border flows (drop cable-level detail and Russia)
-    df = df[["finland", "latvia"]]
-    df.columns = [("ee", "fi"), ("ee", "lv")]
+    df = df[["finland", "latvia", "russia_narva", "russia_pihkva"]]
+    df.columns = [("ee", "fi"), ("ee", "lv"), ("ee", "ru_narva"), ("ee", "ru_pihkva")] 
 
     return df
 
@@ -88,7 +88,7 @@ def fetch_all(fetch_fn, start: str, end: str) -> pd.DataFrame:
     '''Fetches data using the provided fetch functions in monthly chunks and combiines it into one dataframe.'''
     chunks = []
     for chunk_start, chunk_end in generate_monthly_ranges(start, end):
-        print(f"  Fetching {chunk_start[:10]} → {chunk_end[:10]}...")
+        #print(f"  Fetching {chunk_start[:10]} → {chunk_end[:10]}...")
         df = fetch_fn(chunk_start, chunk_end)
         chunks.append(df)
     combined = pd.concat(chunks).sort_index()
