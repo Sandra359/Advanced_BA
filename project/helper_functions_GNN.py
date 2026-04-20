@@ -6,7 +6,7 @@ from datetime import datetime
 
 BASE = "https://dashboard.elering.ee/api"
 
-def get_nps_prices(start: str, end: str) -> pd.DataFrame:
+def get_nps_prices(start: str, end: str, BASE=BASE) -> pd.DataFrame:
 
     r = requests.get(BASE + "/nps/price", params={"start": start, "end": end})
     r.raise_for_status()
@@ -25,7 +25,7 @@ def get_nps_prices(start: str, end: str) -> pd.DataFrame:
     return df_prices
 
 
-def get_cross_border_flows(start: str, end: str) -> pd.DataFrame:
+def get_cross_border_flows(start: str, end: str, BASE=BASE) -> pd.DataFrame:
 
     r = requests.get(BASE + "/transmission/cross-border/hourly", params={"start": start, "end": end})
     r.raise_for_status()
@@ -42,7 +42,7 @@ def get_cross_border_flows(start: str, end: str) -> pd.DataFrame:
 
     return df
 
-def get_system_production(start: str, end: str) -> pd.DataFrame:
+def get_system_production(start: str, end: str, BASE=BASE) -> pd.DataFrame:
     
     r = requests.get(BASE + "/system", params={"start": start, "end": end})
     r.raise_for_status()
@@ -55,7 +55,7 @@ def get_system_production(start: str, end: str) -> pd.DataFrame:
 
     return df
 
-def get_balance_total(start: str, end: str) -> pd.DataFrame:
+def get_balance_total(start: str, end: str, BASE=BASE) -> pd.DataFrame:
     """Monthly energy balance — too coarse for hourly model, kept for reference only."""
     r = requests.get(BASE + "/balance/total", params={"start": start, "end": end})
     r.raise_for_status()
@@ -93,4 +93,5 @@ def fetch_all(fetch_fn, start: str, end: str) -> pd.DataFrame:
         chunks.append(df)
     combined = pd.concat(chunks).sort_index()
     combined = combined[~combined.index.duplicated(keep="first")]
+    return combined
     

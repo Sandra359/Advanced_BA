@@ -1,8 +1,5 @@
-import requests
-import json
 from datetime import datetime
 import pandas as pd
-import sys
 import helper_functions_GNN as helper
 from STGNN import STGNN
 import numpy as np
@@ -13,48 +10,19 @@ import matplotlib.pyplot as plt
 
 
 BASE = "https://dashboard.elering.ee/api"
-PARAMS = {
-    "start": "2025-01-01T00:00:00.000Z",
-    "end":   "2026-01-01T00:00:00.000Z"  # kun 2 timer — lille response
-}
-
-endpoints = {
-    "system":               "/system",
-    "system_with_plan":     "/system/with-plan",
-    "system_latest":        "/system/latest",
-    "flows_hourly":         "/transmission/cross-border/hourly",
-    "flows_latest":         "/transmission/cross-border/latest",
-    "capacity":             "/transmission/cross-border-capacity",
-    "planned_trade":        "/transmission/cross-border-planned-trade",
-    "nps_price":            "/nps/price",
-    "nps_turnover":         "/nps/turnover",
-    "balance":              "/balance",
-    "balance_total":        "/balance/total",
-    "balance_commerce":     "/balance/commerce",
-    "green_certificates":   "/green/certificates",
-}
-
-        
-        
-# --- 2. fetch raw data ---
-
+# Fetching data for 2019-2025
 START = "2019-01-01T00:00:00.000Z"
 END   = "2026-02-01T00:00:00.000Z"
 
-print("Fetching prices...")
-df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
-
-print("Fetching cross-border flows...")
-df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
-
-print("Fetching system production...")
-df_system = helper.fetch_all(helper.get_system_production, START, END)
+df_prices = helper.fetch_all(helper.get_nps_prices, START, END, BASE)
+df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END, BASE)
+df_system = helper.fetch_all(helper.get_system_production, START, END, BASE)
 
 # --- 3. standardize to hourly, then daily ---
 
-df_prices_daily  = df_prices.resample("H").mean()
-df_flows_daily   = df_flows.resample("H").mean()
-df_system_daily  = df_system.resample("H").mean()
+df_prices_daily  = df_prices.resample("h").mean()
+df_flows_daily   = df_flows.resample("h").mean()
+df_system_daily  = df_system.resample("h").mean()
 
 # --- 4. merge into one wide dataframe ---
 
@@ -64,12 +32,9 @@ df_daily = pd.concat([
     df_system_daily.add_prefix("system_"),
 ], axis=1).sort_index()
 
-df_daily = df_daily.dropna(how="all")
-
-print(f"\nShape: {df_daily.shape}")
-print(f"Range: {df_daily.index.min()} → {df_daily.index.max()}")
 print(f"\nMissing values:\n{df_daily.isna().sum()}")
-print(df_daily.head())
+
+df_daily = df_daily.dropna(how="all")
 
 # ==================================================
 # ST-GNN: ESTONIAN ENERGY RESILIENCE MODEL
@@ -78,11 +43,9 @@ print(df_daily.head())
 # ==================================================
 
 
-print("\n[1/6] Preparing data...")
-
-prices_h = df_prices.resample("h").mean()
-flows_h  = df_flows.resample("h").mean()
-system_h = df_system.resample("h").mean()
+prices_h = df_prices_daily.copy()
+flows_h  = df_flows_daily.copy()
+system_h = df_system_daily.copy()
 
 idx      = prices_h.index
 flows_h  = flows_h.reindex(idx, method="ffill")
@@ -90,34 +53,32 @@ system_h = system_h.reindex(idx, method="ffill")
 
 # True energy balance: production + all imports - consumption
 # Positive = surplus, Negative = real deficit even after imports
-system_h["energy_balance"] = (
+system_h["gross_supply_input"] = (
     system_h["production"]
     + flows_h[("ee", "fi")]
     + flows_h[("ee", "lv")]
-    - system_h["consumption"]
 )
 
-print(f"  Balance stats (should be close to 0 on average):")
-print(f"    Mean: {system_h['energy_balance'].mean():+.1f} MW")
-print(f"    Std:  {system_h['energy_balance'].std():.1f} MW")
-print(f"    Min:  {system_h['energy_balance'].min():+.1f} MW")
-print(f"    Max:  {system_h['energy_balance'].max():+.1f} MW")
-print(f"    True deficit hours: {(system_h['energy_balance'] < 0).sum()}")
+print(f"    Mean: {system_h['gross_supply_input'].mean():+.1f} MW")
+print(f"    Std:  {system_h['gross_supply_input'].std():.1f} MW")
+print(f"    Min:  {system_h['gross_supply_input'].min():+.1f} MW")
+print(f"    Max:  {system_h['gross_supply_input'].max():+.1f} MW")
+print(f"    True deficit hours: {(system_h['gross_supply_input'] < 0).sum()}")
 
 # Calendar features (sine/cosine encoding — avoids treating Mon=1, Sun=7 as numeric)
 hour_sin  = np.sin(2 * np.pi * idx.hour / 24)
 hour_cos  = np.cos(2 * np.pi * idx.hour / 24)
 dow_sin   = np.sin(2 * np.pi * idx.dayofweek / 7)
 dow_cos   = np.cos(2 * np.pi * idx.dayofweek / 7)
-month_sin = np.sin(2 * np.pi * idx.month / 12)
-month_cos = np.cos(2 * np.pi * idx.month / 12)
+month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12)
+month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
 # Frequency deviation from 50 Hz — real-time grid stress signal
 freq_deviation = (system_h["frequency"] - 50.0).fillna(0)
 
 # EE node: full feature set
 ee_feats = pd.DataFrame({
-    "energy_balance":       system_h["energy_balance"],
+    "gross_supply_input":   system_h["gross_supply_input"],
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
     "consumption":          system_h["consumption"],
@@ -159,7 +120,7 @@ node_data = np.stack([
 NUM_NODES     = 4
 NUM_FEATURES  = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
-BALANCE_IDX   = FEATURE_NAMES.index("energy_balance")
+SUPPLY_IDX = FEATURE_NAMES.index("gross_supply_input")
 FLOW_FI_IDX   = FEATURE_NAMES.index("flow_fi")
 FLOW_LV_IDX   = FEATURE_NAMES.index("flow_lv")
 RENEW_IDX     = FEATURE_NAMES.index("production_renewable")
@@ -167,7 +128,7 @@ PROD_IDX      = FEATURE_NAMES.index("production")
 
 print(f"\n  Dataset shape: {node_data.shape}  (timesteps x nodes x features)")
 print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
-print(f"  Target: '{FEATURE_NAMES[BALANCE_IDX]}' (index {BALANCE_IDX})")
+print(f"  Target: '{FEATURE_NAMES[SUPPLY_IDX]}' (index {SUPPLY_IDX})")
 
 # ==================================================
 # STEP 2: SEQUENCES + SPLITS
@@ -177,10 +138,12 @@ print("\n[2/6] Creating sequences...")
 SEQ_LEN = 48   # 2 days of hourly history
 HORIZON = 24   # predict 24h ahead
 
+y_target_values = system_h["gross_supply_input"].values
+
 X_list, y_list = [], []
 for t in range(SEQ_LEN, len(node_data) - HORIZON):
     X_list.append(node_data[t - SEQ_LEN:t])
-    y_list.append(node_data[t + HORIZON - 1, 0, BALANCE_IDX])
+    y_list.append(y_target_values[t + HORIZON - 1])
 
 X = np.array(X_list, dtype=np.float32)
 y = np.array(y_list, dtype=np.float32)
@@ -238,7 +201,7 @@ device = torch.device(
     "cuda" if torch.cuda.is_available() else
     ("mps"  if torch.backends.mps.is_available() else "cpu")
 )
-model      = STGNN(NUM_FEATURES, hidden_dim=64).to(device)
+model      = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
 edge_index = edge_index.to(device)
 mean       = mean.to(device)
 std        = std.to(device)
@@ -261,8 +224,8 @@ def quantile_loss(preds, targets, quantiles=[0.1, 0.5, 0.9]):
 optimizer  = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
                                                           patience=5, factor=0.5)
-BATCH_SIZE = 128
-EPOCHS     = 100
+BATCH_SIZE = 64
+EPOCHS     = 50
 
 train_losses, val_losses     = [], []
 best_val_loss, best_state    = float("inf"), None
@@ -287,11 +250,13 @@ for epoch in range(EPOCHS):
         n_batches  += 1
 
     model.eval()
+    val_losses_b = []
     with torch.no_grad():
-        val_loss = quantile_loss(
-            model(X_val_t.to(device), edge_index),
-            y_val_t.to(device)
-        ).item()
+        for i in range(0, len(X_val_t), BATCH_SIZE):
+            xb = X_val_t[i:i + BATCH_SIZE].to(device)
+            yb = y_val_t[i:i + BATCH_SIZE].to(device)
+            val_losses_b.append(quantile_loss(model(xb, edge_index), yb).item())
+    val_loss = np.mean(val_losses_b)
 
     train_losses.append(epoch_loss / n_batches)
     val_losses.append(val_loss)
@@ -357,9 +322,6 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
         x_mod[:, :, 2, FLOW_LV_IDX] = 0.0
 
-        # Remove import contribution from balance feature
-        x_mod[:, :, 0, BALANCE_IDX] -= fi_flow_orig
-        x_mod[:, :, 0, BALANCE_IDX] -= lv_flow_orig
 
     # --- Wind production ---
     # Option A: real simulated series from OpenWeather (use when ready)
@@ -379,7 +341,7 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
                 )
                 x_mod[t, :, 0, RENEW_IDX]    += wind_norm
                 x_mod[t, :, 0, PROD_IDX]     += wind_norm * (wind_std / prod_std)
-                x_mod[t, :, 0, BALANCE_IDX]  += wind_norm
+                x_mod[t, :, 0, SUPPLY_IDX]  += wind_norm
 
     # Option B: flat MW addition (placeholder until wind_series is ready)
     elif extra_wind_mw > 0:
@@ -389,7 +351,7 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         prod_norm = extra_wind_mw / prod_std
         x_mod[:, :, 0, RENEW_IDX]   += wind_norm
         x_mod[:, :, 0, PROD_IDX]    += prod_norm
-        x_mod[:, :, 0, BALANCE_IDX] += wind_norm
+        x_mod[:, :, 0, SUPPLY_IDX] += wind_norm
 
     with torch.no_grad():
         preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
@@ -453,7 +415,7 @@ for mw in [250, 500, 750, 1000, 1500, 2000]:
 # ==================================================
 print("\n[6/6] Visualizing...")
 
-jan_hours = pd.date_range("2026-01-01", periods=len(p50_s1), freq="h", tz="UTC")
+jan_hours = pd.date_range("2026-01-01", periods=len(p50_s1), freq="h", tz="UTC").values
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 fig.suptitle("ST-GNN: Estonian Energy Resilience — January 2026",
@@ -479,6 +441,7 @@ axes[0, 1].fill_between(jan_hours, p50, 0,
     where=(p50 < 0), alpha=0.25, color="red", label="Predicted deficit")
 axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
 axes[0, 1].set_ylabel("Energy balance (MW)")
+axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
 axes[0, 1].legend(fontsize=8)
 axes[0, 1].grid(alpha=0.3)
 axes[0, 1].tick_params(axis="x", rotation=30)
@@ -495,6 +458,7 @@ axes[1, 0].fill_between(jan_hours, p50_s3, 0,
     where=(p50_s3 < 0), alpha=0.12, color="orange")
 axes[1, 0].set_title("Energy Balance by Scenario")
 axes[1, 0].set_ylabel("Balance (MW)  [+ surplus, − deficit]")
+axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
 axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
 axes[1, 0].tick_params(axis="x", rotation=30)

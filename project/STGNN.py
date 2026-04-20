@@ -20,11 +20,11 @@ class STGNN(nn.Module):
         self.gat2 = gnn.GATv2Conv(hidden_dim, hidden_dim, heads=4,
                                    concat=False, dropout=0.2)
         self.gru  = nn.GRU(hidden_dim, hidden_dim,
-                            num_layers=2, batch_first=True, dropout=0.2)
+                            num_layers=2, batch_first=True, dropout=0.3)
         self.decoder = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim, num_quantiles),
         )
 
