@@ -36,9 +36,17 @@ def get_cross_border_flows(start: str, end: str, BASE=BASE) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
     df = df.set_index("timestamp").sort_index()
 
-    # Keep only relevant cross-border flows (drop cable-level detail and Russia)
-    df = df[["finland", "latvia", "russia_narva", "russia_pihkva"]]
-    df.columns = [("ee", "fi"), ("ee", "lv"), ("ee", "ru_narva"), ("ee", "ru_pihkva")] 
+    # Keep only relevant cross-border flows
+    available_cols = df.columns.tolist()
+    col_mapping = {
+        "finland": ("ee", "fi"),
+        "latvia": ("ee", "lv"),
+        "russia_narva": ("ee", "ru_narva"),
+        "russia_pihkva": ("ee", "ru_pihkva"),
+    }
+    selected_cols = [c for c in col_mapping.keys() if c in available_cols]
+    df = df[selected_cols]
+    df.columns = [col_mapping[c] for c in selected_cols] 
 
     return df
 
