@@ -9,12 +9,13 @@ import torch_geometric.nn as gnn
 import matplotlib.pyplot as plt
 import sys
 import power_scaler as ps
-import  GNN_optimzer as opt
+import  GNN_optimizer as opt
 
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2026
 START = "2019-01-01T00:00:00.000Z"
 END   = "2026-02-01T00:00:00.000Z"
+
 
 df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
 df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
