@@ -363,8 +363,11 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
         x_mod[:, :, 2, FLOW_LV_IDX] = 0.0
 
+        # Brug de gemte værdier til at opdatere available_energy
+        x_mod[:, :, 0, SUPPLY_IDX] += fi_flow_orig
+        x_mod[:, :, 0, SUPPLY_IDX] += lv_flow_orig
 
-    # --- Wind production ---
+        # --- Wind production ---
     # Option A: real simulated series from OpenWeather (use when ready)
     if wind_series is not None:
         # wind_series shape: (n_test_hours,) in MW
