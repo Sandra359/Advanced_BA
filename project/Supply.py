@@ -75,7 +75,15 @@ month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12) # Range is originally from 
 month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
 # Frequency deviation from 50 Hz — real-time grid stress signal -- research later
-freq_deviation = (system_h["frequency"] - 50.0).fillna(0) # Check later on missing values 
+
+essential_cols = [ "available_energy", "production", "consumption", "production_renewable", "frequency" ]
+
+for col in essential_cols:
+    if col in system_h.columns:
+        system_h[col] = system_h[col].interpolate(method='linear')
+        system_h[col] = system_h[col].ffill().bfill()
+
+freq_deviation = (system_h["frequency"] - 50.0)
 
 
 # EE node: full feature set
@@ -164,10 +172,6 @@ X_val,   y_val   = X_train_full[val_split:],  y_train_full[val_split:]
 
 print(f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}")
 
-# --- DEBUG TARGETS ---
-print(f"Any NaNs in raw y_train? {np.isnan(y_train).any()}")
-print(f"Any Infs in raw y_train? {np.isinf(y_train).any()}")
-print(f"y_train shape: {y_train.shape} | First 5 values: {y_train[:5]}")
 
 # Normalize — fit ONLY on training data to prevent leakage
 scaler = ps.PowerScaler(X_train, y_train)
@@ -179,11 +183,6 @@ X_test_t  = scaler.scale_x(X_test)
 y_train_t = scaler.scale_y(y_train).view(-1, 1)
 y_val_t   = scaler.scale_y(y_val).view(-1, 1)
 y_test_t  = scaler.scale_y(y_test).view(-1, 1) # Implement differencing
-
-#print(f"X_val_t mean: {X_val_t.mean().item():.4f} (Should be ~0)")
-#print(f"X_val_t std:  {X_val_t.std().item():.4f} (Should be ~1)")
-#print(f"y_val_t mean: {y_val_t.mean().item():.4f} (Should be ~0)")
-#print(f"y_val_t std:  {y_val_t.std().item():.4f} (Should be ~1)")
 
 
 # Graph: EE(0) <-> FI(1), EE(0) <-> LV(2), LV(2) <-> LT(3)
@@ -222,26 +221,6 @@ EPOCHS     = 50
 train_losses, val_losses     = [], []
 best_val_loss, best_state    = float("inf"), None
 
-# Check for NaNs in scaled tensors
-print(f"X_train_t contains NaNs: {torch.isnan(X_train_t).any()}")
-print(f"y_train_t contains NaNs: {torch.isnan(y_train_t).any()}")
-
-# Check for Zero Variance in features
-zero_std_features = (scaler.x_std == 0).any()
-if zero_std_features:
-    print("CRITICAL: Some features have 0 variance. This will cause NaNs.")
-    
-    
-# Identify the rows with NaNs
-nan_mask = system_h["available_energy"].isna()
-nan_data = system_h[nan_mask]["available_energy"]
-
-# Export to CSV to inspect in Excel/VS Code
-nan_data.to_csv("debug_nans.csv")
-
-print(f"  [DEBUG] Exported {len(nan_data)} rows with NaNs to 'debug_nans.csv'")
-    
-sys.exit(0) # Remove this after confirming no NaNs or zero-std features
 
 for epoch in range(EPOCHS):
     model.train()
