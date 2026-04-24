@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3)",
+      "Bash(python3 -c \"import json,sys; nb=json.load\\(sys.stdin\\); [print\\(i, c['cell_type'], c['id'], repr\\(c['source'][:1] if isinstance\\(c['source'], list\\) else c['source'][:50]\\)\\) for i,c in enumerate\\(nb['cells']\\)]\")",
+      "Bash(find /Users/Ursula/Desktop/DTU_nocloud/spring26/advancedBA/project_BA/Advanced_BA -type f ! -path './.git/*' -exec ls -lh {} \\\\;)",
+      "Read(//Users/Ursula/Desktop/DTU_nocloud/spring26/advancedBA/project_BA/Advanced_BA/**)",
+      "Bash(sort -k2)"
+    ]
+  }
+}
