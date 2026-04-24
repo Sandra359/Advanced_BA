@@ -100,8 +100,8 @@ def fetch_all(fetch_fn, start: str, end: str) -> pd.DataFrame:
         #print(f"  Fetching {chunk_start[:10]} → {chunk_end[:10]}...")
         df = fetch_fn(chunk_start, chunk_end)
         chunks.append(df)
+    chunks = [c for c in chunks if not c.empty]
     combined = pd.concat(chunks).sort_index()
-    combined = combined[~combined.index.duplicated(keep="first")]
     return combined
 
 def quantile_loss(preds, targets, quantiles=[0.1, 0.5, 0.9]):

@@ -49,7 +49,7 @@ class STGNN(nn.Module):
         
         # Layer 2 with Residual
         h_prev = h
-        h = torch.relu(self.gat2(h, batch_edges, edge_weight=batch_edge_attr))
+        h = torch.relu(self.gat1(x_flat, batch_edges,edge_attr=batch_edge_attr))
         h = h + h_prev
 
         h_reshaped = h.view(B, T, N, -1)
