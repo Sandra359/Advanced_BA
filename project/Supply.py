@@ -94,6 +94,8 @@ ee_feats = pd.DataFrame({
     "flow_fi":              flows_h[("ee", "fi")],
     "flow_lv":              flows_h[("ee", "lv")],
     "price":                prices_h["ee"],
+    #"temperature":          weather_h["temperature"], #add this somehow
+   # "wind_speed":           weather_h["wind_speed"], #add this somehow
     "freq_deviation":       freq_deviation,
     "hour_sin":             hour_sin,
     "hour_cos":             hour_cos,
@@ -165,6 +167,7 @@ jan2026_start = np.searchsorted(
 X_train_full, y_train_full = X[:jan2026_start], y[:jan2026_start]
 X_test,        y_test       = X[jan2026_start:], y[jan2026_start:]
 
+#we don't use cross validation since we have a clear temporal split and want to simulate real-world forecasting where we train on past data and predict future unseen data. We will use a validation split from the training set to tune hyperparameters and prevent overfitting, but the final evaluation will be on the held-out January 2026 data to see how well our model generalizes to truly unseen conditions.
 val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split],  y_train_full[:val_split]
 X_val,   y_val   = X_train_full[val_split:],  y_train_full[val_split:]
@@ -173,8 +176,10 @@ print(f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (
 
 
 # Normalize — fit ONLY on training data to prevent leakage
-scaler = ps.PowerScaler(X_train, y_train)
+scaler = ps.PowerScaler(X_train, y_train) #scalar object that we can use to scale and inverse scale our data
 
+# Scale all sets (train/val/test) using the same scaler fitted on training data
+#normalize for same scale 
 X_train_t = scaler.scale_x(X_train)
 X_val_t   = scaler.scale_x(X_val)
 X_test_t  = scaler.scale_x(X_test)
@@ -186,8 +191,8 @@ y_test_t  = scaler.scale_y(y_test).view(-1, 1) # Implement differencing
 
 # Graph: EE(0) <-> FI(1), EE(0) <-> LV(2), LV(2) <-> LT(3)
 edge_index = torch.tensor([
-    [0, 1, 0, 2, 2, 3],
-    [1, 0, 2, 0, 3, 2],
+    [0, 1, 0, 2, 2, 3], # source nodes
+    [1, 0, 2, 0, 3, 2], # target nodes (bidirectional edges)
 ], dtype=torch.long)
 
 
@@ -213,8 +218,14 @@ print("\n[4/6] Training...")
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
-BATCH_SIZE = 64
-EPOCHS     = 50
+BATCH_SIZE = 64 #
+EPOCHS     = 50 #
+
+"""
+Val loss still falling at epoch 50  → increase EPOCHS
+Val loss flat from epoch 20 onwards → 50 was too many, use early stopping
+Val loss rises after epoch X        → overfitting, add more dropout or reduce hidden_dim
+"""
 
 # Move edge_index to device ONCE before training
 edge_index = edge_index.to(device)
