@@ -74,9 +74,9 @@ dow_cos   = np.cos(2 * np.pi * idx.dayofweek / 7)
 month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12) # Range is originally from 1 to 12, so subtract 1 to get 0-11 for encoding
 month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
-# Frequency deviation from 50 Hz — real-time grid stress signal -- research later
+# Frequency deviation from 50 Hz — real-time grid stress signal -- research laterhttps://clouglobal.com/power-grid-frequency-why-is-it-important/
 
-essential_cols = [ "available_energy", "production", "consumption", "production_renewable", "frequency" ]
+essential_cols = [ "available_energy", "production", "production_renewable", "frequency" ]
 
 for col in essential_cols:
     if col in system_h.columns:
@@ -91,7 +91,6 @@ ee_feats = pd.DataFrame({
     "available_energy":   system_h["available_energy"],
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
-    "consumption":          system_h["consumption"],
     "flow_fi":              flows_h[("ee", "fi")],
     "flow_lv":              flows_h[("ee", "lv")],
     "price":                prices_h["ee"],
@@ -218,52 +217,90 @@ scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
 BATCH_SIZE = 64
 EPOCHS     = 50
 
-train_losses, val_losses     = [], []
-best_val_loss, best_state    = float("inf"), None
+# ==================================================
+# STEP 4: TRAINING LOOP (IMPROVED)
+# ==================================================
+print("\n[4/6] Training...")
 
+# Setup optimizer and scheduler
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+
+BATCH_SIZE = 64
+EPOCHS     = 50
+
+# Move edge_index to device ONCE before training
+edge_index = edge_index.to(device)
+
+train_losses, val_losses = [], []
+best_val_loss = float("inf")
+# Initialize best_state with current weights as a fallback
+best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
 for epoch in range(EPOCHS):
     model.train()
-    perm       = torch.randperm(len(X_train_t))
+    perm = torch.randperm(len(X_train_t))
     epoch_loss = 0.0
-    n_batches  = 0
+    n_batches = 0
 
     for i in range(0, len(X_train_t), BATCH_SIZE):
         idx_b = perm[i:i + BATCH_SIZE]
-        xb    = X_train_t[idx_b].to(device)
-        yb    = y_train_t[idx_b].to(device)
+        xb = X_train_t[idx_b].to(device)
+        yb = y_train_t[idx_b].to(device)
 
         optimizer.zero_grad()
-        loss = helper.quantile_loss(model(xb, edge_index), yb)
+        
+        # Forward pass
+        preds = model(xb, edge_index)
+        loss = helper.quantile_loss(preds, yb)
+        
+        # Check for NaN loss (prevents model corruption)
+        if torch.isnan(loss):
+            print(f"  [!] NaN loss detected at epoch {epoch+1}, batch {i}. Check your inputs!")
+            continue
+
         loss.backward()
+        
+        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        
         optimizer.step()
         epoch_loss += loss.item()
-        n_batches  += 1
+        n_batches += 1
 
+    # Validation Phase
     model.eval()
     val_losses_b = []
     with torch.no_grad():
         for i in range(0, len(X_val_t), BATCH_SIZE):
-            xb = X_val_t[i:i + BATCH_SIZE].to(device)
-            yb = y_val_t[i:i + BATCH_SIZE].to(device)
-            val_losses_b.append(helper.quantile_loss(model(xb, edge_index), yb).item())
-    val_loss = np.mean(val_losses_b)
+            xb_v = X_val_t[i:i + BATCH_SIZE].to(device)
+            yb_v = y_val_t[i:i + BATCH_SIZE].to(device)
+            
+            v_preds = model(xb_v, edge_index)
+            v_loss = helper.quantile_loss(v_preds, yb_v)
+            val_losses_b.append(v_loss.item())
+    
+    avg_train_loss = epoch_loss / max(n_batches, 1)
+    avg_val_loss = np.mean(val_losses_b)
 
-    train_losses.append(epoch_loss / n_batches)
-    val_losses.append(val_loss)
-    scheduler.step(val_loss)
+    train_losses.append(avg_train_loss)
+    val_losses.append(avg_val_loss)
+    
+    # Adjust learning rate based on validation performance
+    scheduler.step(avg_val_loss)
 
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    # Save best model
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-    if (epoch + 1) % 5 == 0:
-        print(f"  Epoch {epoch+1:3d}: train={train_losses[-1]:.4f}  "
-              f"val={val_losses[-1]:.4f}")
+    if (epoch + 1) % 5 == 0 or epoch == 0:
+        print(f"  Epoch {epoch+1:3d}: train_loss={avg_train_loss:.4f} | "
+              f"val_loss={avg_val_loss:.4f} | lr={optimizer.param_groups[0]['lr']:.6f}")
 
+# Load the best performing weights back into the model
 model.load_state_dict(best_state)
-print(f"  Best val loss: {best_val_loss:.4f}")
+print(f"  Training complete. Best Val Loss: {best_val_loss:.4f}")
 
 # ==================================================
 # STEP 5: EVALUATE + SCENARIOS
@@ -272,7 +309,12 @@ print("\n[5/6] Evaluating on January 2026...")
 
 model.eval()
 with torch.no_grad():
-    test_preds = model(X_test_t.to(device), edge_index).cpu().numpy()
+    # Ensure test data is on the correct device
+    X_test_device = X_test_t.to(device)
+    # Get predictions and move back to CPU for numpy/plotting
+    test_preds = model(X_test_device, edge_index).cpu().numpy()
+
+print(f"  Predictions generated for {len(test_preds)} samples.")
 
 p10    = scaler.inverse_y(test_preds[:, 0])
 p50    = scaler.inverse_y(test_preds[:, 1])
