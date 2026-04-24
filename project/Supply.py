@@ -57,11 +57,12 @@ df_daily = df_daily.dropna(how="all") # Thinking about imputing them
 prices_h = df_prices_hourly.copy()
 flows_h  = df_flows_hourly.copy()
 system_h = df_system_hourly.copy()
+weather_h = df_weather_hourly.copy()
 
 idx      = prices_h.index
 flows_h  = flows_h.reindex(idx, method="ffill")
 system_h = system_h.reindex(idx, method="ffill")
-
+weather_h = weather_h.reindex(idx, method="ffill")
 # True energy balance: production + all imports - consumption
 # Positive = surplus, Negative = real deficit even after imports
 system_h["available_energy"] = (
@@ -99,14 +100,14 @@ freq_deviation = (system_h["frequency"] - 50.0)
 
 # EE node: full feature set
 ee_feats = pd.DataFrame({
-    "available_energy":   system_h["available_energy"],
+    "available_energy":     system_h["available_energy"],
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
-    "flow_fi":              flows_h[("ee", "fi")],
-    "flow_lv":              flows_h[("ee", "lv")],
+    "flow_fi":              flows_h["ee_fi"],
+    "flow_lv":              flows_h["ee_lv"],
     "price":                prices_h["ee"],
-    #"temperature":          weather_h["temperature"], #add this somehow
-   # "wind_speed":           weather_h["wind_speed"], #add this somehow
+    "temperature":          weather_h["temperature"],    # ← now active
+    "wind_speed_10m":       weather_h["wind_speed_10m"], # ← now active
     "freq_deviation":       freq_deviation,
     "hour_sin":             hour_sin,
     "hour_cos":             hour_cos,
@@ -114,7 +115,7 @@ ee_feats = pd.DataFrame({
     "dow_cos":              dow_cos,
     "month_sin":            month_sin,
     "month_cos":            month_cos,
-}, index=idx).fillna(0) # Might change it into imputing values later instead of filling with 0, but for now it is fine since we have no missing values in these features
+}, index=idx).fillna(0)# Might change it into imputing values later instead of filling with 0, but for now it is fine since we have no missing values in these features
 
 # Neighbouring nodes — only features we actually have for them
 fi_feats = pd.DataFrame({

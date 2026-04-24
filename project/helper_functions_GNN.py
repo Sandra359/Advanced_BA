@@ -3,6 +3,7 @@ import pandas as pd
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
 import torch
+import time
 
 
 BASE = "https://dashboard.elering.ee/api"
@@ -112,131 +113,41 @@ def quantile_loss(preds, targets, quantiles=[0.1, 0.5, 0.9]):
         losses.append(torch.max(q * e, (q - 1) * e))
     return torch.stack(losses, dim=1).mean()
     
-import datetime
 
-OPENWEATHER_KEY = "822ed994e581c3d5ec9ce7d445f486e3"
-HIST_URL = "http://history.openweathermap.org/data/2.5/history/city"
 
-def get_weather_history(lat: float, lon: float, 
-                         start: str, end: str,
-                         api_key: str = OPENWEATHER_KEY) -> pd.DataFrame:
+def get_weather_openmeteo(lat: float, lon: float,
+                           start: str, end: str) -> pd.DataFrame:
     """
-    Fetch hourly weather history from OpenWeatherMap for a single coordinate.
-    
-    Parameters:
-        lat, lon:  Coordinates of the location
-        start, end: ISO format strings e.g. "2019-01-01T00:00:00.000Z"
-        api_key:   OpenWeatherMap API key
-    
-    Returns:
-        DataFrame with hourly temperature and wind speed, UTC indexed
+    Free historical weather — no API key, no subscription needed.
+    Uses ERA5 reanalysis — covers 1979 to present at hourly resolution.
     """
-    # Convert ISO strings to unix timestamps
-    start_ts = int(datetime.datetime.fromisoformat(
-        start.replace("Z", "+00:00")).timestamp())
-    end_ts   = int(datetime.datetime.fromisoformat(
-        end.replace("Z", "+00:00")).timestamp())
-    
-    CHUNK_SEC = 168 * 3600  # 168 hours = max per API call
-    
-    all_records = []
-    current_ts  = start_ts
-    
-    while current_ts < end_ts:
-        chunk_end = min(current_ts + CHUNK_SEC, end_ts)
-        
-        params = {
-            "lat":   lat,
-            "lon":   lon,
-            "type":  "hour",
-            "start": current_ts,
-            "end":   chunk_end,
-            "appid": api_key,
-            "units": "metric",
-        }
-        
-        try:
-            r = requests.get(HIST_URL, params=params, timeout=30)
-            if r.status_code != 200:
-                print(f"  WARNING {r.status_code} for chunk "
-                      f"{datetime.datetime.fromtimestamp(current_ts, tz=datetime.timezone.utc).date()}: "
-                      f"{r.text[:100]}")
-                current_ts = chunk_end
-                time.sleep(1)
-                continue
-            
-            records = r.json().get("list", [])
-            all_records.extend(records)
-            print(f"  Fetched {len(records)} hours from "
-                  f"{datetime.datetime.fromtimestamp(current_ts, tz=datetime.timezone.utc).date()}: "
-                  f"→ {datetime.datetime.fromtimestamp(chunk_end,   tz=datetime.timezone.utc).date()}")
-        
-        except requests.exceptions.Timeout:
-            print(f"  Timeout, retrying...")
-            time.sleep(5)
-            continue
-        
-        current_ts = chunk_end
-        time.sleep(0.5)  # be polite to the API
-    
-    if not all_records:
-        print("  No records returned — check API key and subscription")
+    r = requests.get(
+        "https://archive-api.open-meteo.com/v1/archive",
+        params={
+            "latitude":        lat,
+            "longitude":       lon,
+            "start_date":      start[:10],  # "2019-01-01"
+            "end_date":        end[:10],    # "2026-02-01"
+            "hourly":          "temperature_2m,wind_speed_10m,wind_speed_100m",
+            "wind_speed_unit": "ms",
+            "timezone":        "UTC",
+        },
+        timeout=60
+    )
+
+    if r.status_code != 200:
+        print(f"  ERROR {r.status_code}: {r.text[:200]}")
         return pd.DataFrame()
-    
-    # Parse into clean DataFrame
-    rows = []
-    for rec in all_records:
-        rows.append({
-            "timestamp":      pd.Timestamp(rec["dt"], unit="s", tz="UTC"),
-            "temperature":    rec.get("main", {}).get("temp"),
-            "wind_speed_10m": rec.get("wind", {}).get("speed"),
-            "wind_gust":      rec.get("wind", {}).get("gust"),
-            "wind_dir":       rec.get("wind", {}).get("deg"),
-            "pressure":       rec.get("main", {}).get("pressure"),
-        })
-    
-    df = pd.DataFrame(rows).set_index("timestamp").sort_index()
-    df = df[~df.index.duplicated(keep="first")]
+
+    data = r.json()
+    df = pd.DataFrame({
+        "timestamp":       pd.to_datetime(data["hourly"]["time"], utc=True),
+        "temperature":     data["hourly"]["temperature_2m"],
+        "wind_speed_10m":  data["hourly"]["wind_speed_10m"],
+        "wind_speed_100m": data["hourly"]["wind_speed_100m"],
+    })
+
+    df = df.set_index("timestamp").sort_index()
+    print(f"  Fetched {len(df)} hours: {df.index.min()} → {df.index.max()}")
     return df
 
-
-def get_weather_for_locations(locations_df: pd.DataFrame,
-                               start: str, end: str,
-                               lat_col: str = "centroid_lat",
-                               lon_col: str = "centroid_lon",
-                               name_col: str = "area_name") -> pd.DataFrame:
-    """
-    Fetch weather for multiple wind farm locations and average them.
-    
-    Parameters:
-        locations_df: DataFrame with lat/lon columns for each wind farm site
-        start, end:   ISO date strings
-        
-    Returns:
-        Single DataFrame with averaged weather across all locations, hourly UTC indexed
-    """
-    all_dfs = []
-    
-    for _, row in locations_df.iterrows():
-        print(f"\nFetching weather for: {row[name_col]} "
-              f"({row[lat_col]:.2f}°N, {row[lon_col]:.2f}°E)")
-        
-        df = get_weather_history(
-            lat=row[lat_col],
-            lon=row[lon_col],
-            start=start,
-            end=end
-        )
-        
-        if not df.empty:
-            all_dfs.append(df)
-    
-    if not all_dfs:
-        print("No weather data fetched")
-        return pd.DataFrame()
-    
-    # Average across all locations
-    combined = pd.concat(all_dfs).groupby(level=0).mean()
-    print(f"\nCombined weather shape: {combined.shape}")
-    print(f"Date range: {combined.index.min()} → {combined.index.max()}")
-    return combined
