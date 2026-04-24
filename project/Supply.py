@@ -19,11 +19,21 @@ df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
 df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
 df_system = helper.fetch_all(helper.get_system_production, START, END)
 
+# Simple — just fetch weather for one central Estonian location - we assume that it is representative for the whole country for now, but we can add more locations later if needed
+df_weather = helper.get_weather_history(
+    lat=58.90,  # central Estonia / Pärnu area
+    lon=24.75,
+    start=START,
+    end=END
+)
+
+
 # --- 3. standardize to hourly, then daily ---
 
 df_prices_hourly  = df_prices.resample("h").mean() # The data is mostly per 15 minutes and some are hourly
 df_flows_hourly   = df_flows.resample("h").mean().fillna(0) # The data is only hourly but resampling to be sure for alignment
 df_system_hourly  = df_system.resample("h").mean() # Mostly per 5 minutes, some entries are 0:00 (maybe missing?) and 5 minutes
+df_weather_hourly = df_weather.resample("h").mean().reindex(idx, method="ffill")
 
 # --- 4. merge into one wide dataframe ---
 
@@ -31,6 +41,7 @@ df_daily = pd.concat([
     df_prices_hourly.add_prefix("price_"),
     df_flows_hourly.add_prefix("flow_"),
     df_system_hourly.add_prefix("system_"),
+    df_weather_hourly.add_prefix("weather_"),
 ], axis=1).sort_index()
 
 
@@ -40,7 +51,7 @@ df_daily[flow_cols] = df_daily[flow_cols].fillna(0)
 df_daily = df_daily.dropna(how="all") # Thinking about imputing them
 
 
-# Target: True available energy in Estonia = production + imports
+#_h Target: True available energy in Estonia = production + imports
 # Scenarios: S1 = full grid, S2 = full isolation, S3 = isolated + wind (TBD)
 
 prices_h = df_prices_hourly.copy()
