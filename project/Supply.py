@@ -8,11 +8,12 @@ import torch.nn as nn
 import torch_geometric.nn as gnn
 import matplotlib.pyplot as plt
 import sys
+import power_scaler as ps
 
 BASE = "https://dashboard.elering.ee/api"
-# Fetching data for 2019-2025
+# Fetching data for 2019-2026
 START = "2019-01-01T00:00:00.000Z"
-END   = "2020-02-01T00:00:00.000Z"
+END   = "2026-01-01T00:00:00.000Z"
 
 df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
 df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
@@ -32,7 +33,6 @@ df_daily = pd.concat([
     df_system_hourly.add_prefix("system_"),
 ], axis=1).sort_index()
 
-print(f"\nMissing values:\n{df_daily.isna().sum()}") 
 
 
 flow_cols = [col for col in df_daily.columns if col.startswith("flow_")]
@@ -62,24 +62,21 @@ system_h["available_energy"] = (
 ) # available energy = energy produced in 
 
 
-print(f"    Mean: {system_h['available_energy'].mean():+.1f} MW")
-print(f"    Std:  {system_h['available_energy'].std():.1f} MW")
-print(f"    Min:  {system_h['available_energy'].min():+.1f} MW")
-print(f"    Max:  {system_h['available_energy'].max():+.1f} MW")
 print(f"    Hours without enough energy: {(system_h['available_energy'] < 0).sum()}")
 
-sys.exit(0)
+
 
 # Calendar features (sine/cosine encoding — avoids treating Mon=1, Sun=7 as numeric)
 hour_sin  = np.sin(2 * np.pi * idx.hour / 24)
 hour_cos  = np.cos(2 * np.pi * idx.hour / 24)
 dow_sin   = np.sin(2 * np.pi * idx.dayofweek / 7)
 dow_cos   = np.cos(2 * np.pi * idx.dayofweek / 7)
-month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12)
+month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12) # Range is originally from 1 to 12, so subtract 1 to get 0-11 for encoding
 month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
 # Frequency deviation from 50 Hz — real-time grid stress signal -- research later
-freq_deviation = (system_h["frequency"] - 50.0).fillna(0)
+freq_deviation = (system_h["frequency"] - 50.0).fillna(0) # Check later on missing values 
+
 
 # EE node: full feature set
 ee_feats = pd.DataFrame({
@@ -97,7 +94,7 @@ ee_feats = pd.DataFrame({
     "dow_cos":              dow_cos,
     "month_sin":            month_sin,
     "month_cos":            month_cos,
-}, index=idx).fillna(0)
+}, index=idx).fillna(0) # Might change it into imputing values later instead of filling with 0, but for now it is fine since we have no missing values in these features
 
 # Neighbouring nodes — only features we actually have for them
 fi_feats = pd.DataFrame({
@@ -122,18 +119,18 @@ node_data = np.stack([
     lt_feats.values,   # node 3: LT
 ], axis=1)
 
+# We didn't include Russia since we don't have good features for it
+
 NUM_NODES     = 4
 NUM_FEATURES  = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
-SUPPLY_IDX = FEATURE_NAMES.index("gross_supply_input")
+SUPPLY_IDX = FEATURE_NAMES.index("available_energy")  # target is the true energy balance in Estonia (production + imports)
 FLOW_FI_IDX   = FEATURE_NAMES.index("flow_fi")
 FLOW_LV_IDX   = FEATURE_NAMES.index("flow_lv")
 RENEW_IDX     = FEATURE_NAMES.index("production_renewable")
 PROD_IDX      = FEATURE_NAMES.index("production")
 
-print(f"\n  Dataset shape: {node_data.shape}  (timesteps x nodes x features)")
-print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
-print(f"  Target: '{FEATURE_NAMES[SUPPLY_IDX]}' (index {SUPPLY_IDX})")
+
 
 # ==================================================
 # STEP 2: SEQUENCES + SPLITS
@@ -143,11 +140,11 @@ print("\n[2/6] Creating sequences...")
 SEQ_LEN = 48   # 2 days of hourly history
 HORIZON = 24   # predict 24h ahead
 
-y_target_values = system_h["gross_supply_input"].values
+y_target_values = system_h["available_energy"].values
 
 X_list, y_list = [], []
 for t in range(SEQ_LEN, len(node_data) - HORIZON):
-    X_list.append(node_data[t - SEQ_LEN:t])
+    X_list.append(node_data[t - SEQ_LEN:t]) # Each sample is a (SEQ_LEN, N, F) tensor covering hours t-SEQ_LEN to t-1
     y_list.append(y_target_values[t + HORIZON - 1])
 
 X = np.array(X_list, dtype=np.float32)
@@ -165,41 +162,35 @@ val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split],  y_train_full[:val_split]
 X_val,   y_val   = X_train_full[val_split:],  y_train_full[val_split:]
 
-print(f"  Train: {len(X_train):,} samples  ({X_train.shape})")
-print(f"  Val:   {len(X_val):,} samples")
-print(f"  Test (Jan 2026): {len(X_test):,} samples")
+print(f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}")
+
+# --- DEBUG TARGETS ---
+print(f"Any NaNs in raw y_train? {np.isnan(y_train).any()}")
+print(f"Any Infs in raw y_train? {np.isinf(y_train).any()}")
+print(f"y_train shape: {y_train.shape} | First 5 values: {y_train[:5]}")
 
 # Normalize — fit ONLY on training data to prevent leakage
-X_train_t = torch.from_numpy(X_train)
-mean = X_train_t.mean(dim=(0, 1), keepdim=True)
-std  = X_train_t.std(dim=(0, 1),  keepdim=True) + 1e-7
+scaler = ps.PowerScaler(X_train, y_train)
 
-def normalize(arr):
-    return (torch.from_numpy(arr) - mean) / std
+X_train_t = scaler.scale_x(X_train)
+X_val_t   = scaler.scale_x(X_val)
+X_test_t  = scaler.scale_x(X_test)
 
-X_train_t = normalize(X_train)
-X_val_t   = normalize(X_val)
-X_test_t  = normalize(X_test)
+y_train_t = scaler.scale_y(y_train).view(-1, 1)
+y_val_t   = scaler.scale_y(y_val).view(-1, 1)
+y_test_t  = scaler.scale_y(y_test).view(-1, 1) # Implement differencing
 
-# Scale targets on training stats only
-balance_mean = float(y_train.mean())
-balance_std  = float(y_train.std()) + 1e-7
+#print(f"X_val_t mean: {X_val_t.mean().item():.4f} (Should be ~0)")
+#print(f"X_val_t std:  {X_val_t.std().item():.4f} (Should be ~1)")
+#print(f"y_val_t mean: {y_val_t.mean().item():.4f} (Should be ~0)")
+#print(f"y_val_t std:  {y_val_t.std().item():.4f} (Should be ~1)")
 
-y_train_t = torch.from_numpy((y_train - balance_mean) / balance_std).view(-1, 1)
-y_val_t   = torch.from_numpy((y_val   - balance_mean) / balance_std).view(-1, 1)
-y_test_t  = torch.from_numpy((y_test  - balance_mean) / balance_std).view(-1, 1)
-
-def inv_balance(arr):
-    return arr * balance_std + balance_mean
 
 # Graph: EE(0) <-> FI(1), EE(0) <-> LV(2), LV(2) <-> LT(3)
 edge_index = torch.tensor([
     [0, 1, 0, 2, 2, 3],
     [1, 0, 2, 0, 3, 2],
 ], dtype=torch.long)
-
-print(f"  Graph: {NUM_NODES} nodes, {edge_index.shape[1]} directed edges")
-
 
 
 device = torch.device(
@@ -208,23 +199,19 @@ device = torch.device(
 )
 model      = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
 edge_index = edge_index.to(device)
-mean       = mean.to(device)
-std        = std.to(device)
+x_mean       = scaler.x_mean.to(device)
+x_std        = scaler.x_std.to(device)
 
 print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}")
+
+
 
 # ==================================================
 # STEP 4: TRAIN
 # ==================================================
 print("\n[4/6] Training...")
 
-def quantile_loss(preds, targets, quantiles=[0.1, 0.5, 0.9]):
-    targets = targets.squeeze()
-    losses  = []
-    for i, q in enumerate(quantiles):
-        e = targets - preds[:, i]
-        losses.append(torch.max(q * e, (q - 1) * e))
-    return torch.stack(losses, dim=1).mean()
+
 
 optimizer  = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
@@ -234,6 +221,27 @@ EPOCHS     = 50
 
 train_losses, val_losses     = [], []
 best_val_loss, best_state    = float("inf"), None
+
+# Check for NaNs in scaled tensors
+print(f"X_train_t contains NaNs: {torch.isnan(X_train_t).any()}")
+print(f"y_train_t contains NaNs: {torch.isnan(y_train_t).any()}")
+
+# Check for Zero Variance in features
+zero_std_features = (scaler.x_std == 0).any()
+if zero_std_features:
+    print("CRITICAL: Some features have 0 variance. This will cause NaNs.")
+    
+    
+# Identify the rows with NaNs
+nan_mask = system_h["available_energy"].isna()
+nan_data = system_h[nan_mask]["available_energy"]
+
+# Export to CSV to inspect in Excel/VS Code
+nan_data.to_csv("debug_nans.csv")
+
+print(f"  [DEBUG] Exported {len(nan_data)} rows with NaNs to 'debug_nans.csv'")
+    
+sys.exit(0) # Remove this after confirming no NaNs or zero-std features
 
 for epoch in range(EPOCHS):
     model.train()
@@ -247,7 +255,7 @@ for epoch in range(EPOCHS):
         yb    = y_train_t[idx_b].to(device)
 
         optimizer.zero_grad()
-        loss = quantile_loss(model(xb, edge_index), yb)
+        loss = helper.quantile_loss(model(xb, edge_index), yb)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
@@ -260,7 +268,7 @@ for epoch in range(EPOCHS):
         for i in range(0, len(X_val_t), BATCH_SIZE):
             xb = X_val_t[i:i + BATCH_SIZE].to(device)
             yb = y_val_t[i:i + BATCH_SIZE].to(device)
-            val_losses_b.append(quantile_loss(model(xb, edge_index), yb).item())
+            val_losses_b.append(helper.quantile_loss(model(xb, edge_index), yb).item())
     val_loss = np.mean(val_losses_b)
 
     train_losses.append(epoch_loss / n_batches)
@@ -287,10 +295,10 @@ model.eval()
 with torch.no_grad():
     test_preds = model(X_test_t.to(device), edge_index).cpu().numpy()
 
-p10    = inv_balance(test_preds[:, 0])
-p50    = inv_balance(test_preds[:, 1])
-p90    = inv_balance(test_preds[:, 2])
-actual = inv_balance(y_test_t.squeeze().numpy())
+p10    = scaler.inverse_y(test_preds[:, 0])
+p50    = scaler.inverse_y(test_preds[:, 1])
+p90    = scaler.inverse_y(test_preds[:, 2])
+actual = scaler.inverse_y(y_test_t.squeeze().numpy())
 
 mae      = np.mean(np.abs(p50 - actual))
 rmse     = np.sqrt(np.mean((p50 - actual) ** 2))
@@ -333,8 +341,8 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     if wind_series is not None:
         # wind_series shape: (n_test_hours,) in MW
         # Normalize using training std for renewable feature
-        wind_std = std[0, 0, 0, RENEW_IDX].item()
-        prod_std = std[0, 0, 0, PROD_IDX].item()
+        wind_std = x_std [0, 0, 0, RENEW_IDX].item()
+        prod_std = x_std[0, 0, 0, PROD_IDX].item()
 
         for t in range(len(x_mod)):
             # The sequence window for sample t covers hours t to t+SEQ_LEN
@@ -350,8 +358,8 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
 
     # Option B: flat MW addition (placeholder until wind_series is ready)
     elif extra_wind_mw > 0:
-        wind_std = std[0, 0, 0, RENEW_IDX].item()
-        prod_std = std[0, 0, 0, PROD_IDX].item()
+        wind_std = x_std [0, 0, 0, RENEW_IDX].item()
+        prod_std = x_std[0, 0, 0, PROD_IDX].item()
         wind_norm = extra_wind_mw / wind_std
         prod_norm = extra_wind_mw / prod_std
         x_mod[:, :, 0, RENEW_IDX]   += wind_norm
@@ -361,9 +369,9 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     with torch.no_grad():
         preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
 
-    p10_s = inv_balance(preds[:, 0])
-    p50_s = inv_balance(preds[:, 1])
-    p90_s = inv_balance(preds[:, 2])
+    p10_s = scaler.inverse_y(preds[:, 0])
+    p50_s = scaler.inverse_y(preds[:, 1])
+    p90_s = scaler.inverse_y(preds[:, 2])
 
     deficit_h = (p50_s < 0).sum()
     severe_h  = (p50_s < -100).sum()

@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
+import torch
 
 
 BASE = "https://dashboard.elering.ee/api"
@@ -94,4 +95,12 @@ def fetch_all(fetch_fn, start: str, end: str) -> pd.DataFrame:
     combined = pd.concat(chunks).sort_index()
     combined = combined[~combined.index.duplicated(keep="first")]
     return combined
+
+def quantile_loss(preds, targets, quantiles=[0.1, 0.5, 0.9]):
+    targets = targets.squeeze()
+    losses  = []
+    for i, q in enumerate(quantiles):
+        e = targets - preds[:, i]
+        losses.append(torch.max(q * e, (q - 1) * e))
+    return torch.stack(losses, dim=1).mean()
     
