@@ -354,7 +354,9 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         # Remove all edges — Estonia fully island-mode
         edges = torch.zeros((2, 0), dtype=torch.long)
 
-        # Zero out import flows in features (Estonia can't import)
+       
+    # S2 scenario: Estonia fully isolated — no cross-border connections
+    # Step 1: save original flow values before zeroing (needed to update supply)
         fi_flow_orig = x_mod[:, :, 0, FLOW_FI_IDX].clone()
         lv_flow_orig = x_mod[:, :, 0, FLOW_LV_IDX].clone()
 
