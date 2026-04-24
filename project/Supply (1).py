@@ -13,7 +13,7 @@ import power_scaler as ps
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2026
 START = "2019-01-01T00:00:00.000Z"
-END   = "2026-02-01T00:00:00.000Z"
+END   = "2026-01-01T00:00:00.000Z"
 
 df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
 df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
@@ -22,7 +22,7 @@ df_system = helper.fetch_all(helper.get_system_production, START, END)
 # --- 3. standardize to hourly, then daily ---
 
 df_prices_hourly  = df_prices.resample("h").mean() # The data is mostly per 15 minutes and some are hourly
-df_flows_hourly   = df_flows.resample("h").mean().fillna(0) # The data is only hourly but resampling to be sure for alignment
+df_flows_hourly   = df_flows.resample("h").mean().fillna(0) # replace by + The data is only hourly but resampling to be sure for alignment
 df_system_hourly  = df_system.resample("h").mean() # Mostly per 5 minutes, some entries are 0:00 (maybe missing?) and 5 minutes
 
 # --- 4. merge into one wide dataframe ---
@@ -36,8 +36,8 @@ df_daily = pd.concat([
 
 
 flow_cols = [col for col in df_daily.columns if col.startswith("flow_")]
-df_daily[flow_cols] = df_daily[flow_cols].fillna(0)
-df_daily = df_daily.dropna(how="all") # Thinking about imputing them
+df_daily[flow_cols] = df_daily[flow_cols].fillna(0) #missing flow data is replaced with 0 
+df_daily = df_daily.dropna(how="all") # Thinking about imputing them - but now we just drop the remaining rows
 
 
 # Target: True available energy in Estonia = production + imports
@@ -57,7 +57,7 @@ system_h["available_energy"] = (
     system_h["production"]
     - flows_h[("ee", "fi")]
     - flows_h[("ee", "lv")] 
-    - flows_h[("ee", "ru_narva")]
+    - flows_h[("ee", "ru_narva")] #also russia since it was present before 2025
     - flows_h[("ee", "ru_pihkva")]
 ) # available energy = energy produced in 
 
@@ -67,6 +67,7 @@ print(f"    Hours without enough energy: {(system_h['available_energy'] < 0).sum
 
 
 # Calendar features (sine/cosine encoding — avoids treating Mon=1, Sun=7 as numeric)
+#and also to capture that january and december are close to each other in terms of seasonality, same for hours of the day and days of the week
 hour_sin  = np.sin(2 * np.pi * idx.hour / 24)
 hour_cos  = np.cos(2 * np.pi * idx.hour / 24)
 dow_sin   = np.sin(2 * np.pi * idx.dayofweek / 7)
@@ -74,16 +75,9 @@ dow_cos   = np.cos(2 * np.pi * idx.dayofweek / 7)
 month_sin = np.sin(2 * np.pi * (idx.month - 1) / 12) # Range is originally from 1 to 12, so subtract 1 to get 0-11 for encoding
 month_cos = np.cos(2 * np.pi * (idx.month - 1) / 12)
 
-# Frequency deviation from 50 Hz — real-time grid stress signal -- research laterhttps://clouglobal.com/power-grid-frequency-why-is-it-important/
-
-essential_cols = [ "available_energy", "production", "production_renewable", "frequency" ]
-
-for col in essential_cols:
-    if col in system_h.columns:
-        system_h[col] = system_h[col].interpolate(method='linear')
-        system_h[col] = system_h[col].ffill().bfill()
-
-freq_deviation = (system_h["frequency"] - 50.0)
+# Frequency deviation from 50 Hz — real-time grid stress signal -- research later
+freq_deviation = (system_h["frequency"] - 50.0).fillna(0) # Check later on missing values 
+# https://clouglobal.com/power-grid-frequency-why-is-it-important/ - source about frequency deviation and its importance as a grid stress signal. We can research more about it later and maybe add it as a feature if we find it useful for the model. For now, we include it as a potential signal of grid stress that could correlate with supply-demand imbalances.
 
 
 # EE node: full feature set
@@ -94,8 +88,6 @@ ee_feats = pd.DataFrame({
     "flow_fi":              flows_h[("ee", "fi")],
     "flow_lv":              flows_h[("ee", "lv")],
     "price":                prices_h["ee"],
-    #"temperature":          weather_h["temperature"], #add this somehow
-   # "wind_speed":           weather_h["wind_speed"], #add this somehow
     "freq_deviation":       freq_deviation,
     "hour_sin":             hour_sin,
     "hour_cos":             hour_cos,
@@ -119,6 +111,7 @@ lv_feats = pd.DataFrame({
 lt_feats = pd.DataFrame({
     "price": prices_h["lt"],
 }, index=idx).reindex(columns=ee_feats.columns, fill_value=0).fillna(0)
+
 
 # Stack into (T, N, F)
 node_data = np.stack([
@@ -167,19 +160,20 @@ jan2026_start = np.searchsorted(
 X_train_full, y_train_full = X[:jan2026_start], y[:jan2026_start]
 X_test,        y_test       = X[jan2026_start:], y[jan2026_start:]
 
-#we don't use cross validation since we have a clear temporal split and want to simulate real-world forecasting where we train on past data and predict future unseen data. We will use a validation split from the training set to tune hyperparameters and prevent overfitting, but the final evaluation will be on the held-out January 2026 data to see how well our model generalizes to truly unseen conditions.
 val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split],  y_train_full[:val_split]
 X_val,   y_val   = X_train_full[val_split:],  y_train_full[val_split:]
 
 print(f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}")
 
+# --- DEBUG TARGETS ---
+print(f"Any NaNs in raw y_train? {np.isnan(y_train).any()}")
+print(f"Any Infs in raw y_train? {np.isinf(y_train).any()}")
+print(f"y_train shape: {y_train.shape} | First 5 values: {y_train[:5]}")
 
 # Normalize — fit ONLY on training data to prevent leakage
-scaler = ps.PowerScaler(X_train, y_train) #scalar object that we can use to scale and inverse scale our data
+scaler = ps.PowerScaler(X_train, y_train)
 
-# Scale all sets (train/val/test) using the same scaler fitted on training data
-#normalize for same scale 
 X_train_t = scaler.scale_x(X_train)
 X_val_t   = scaler.scale_x(X_val)
 X_test_t  = scaler.scale_x(X_test)
@@ -188,11 +182,16 @@ y_train_t = scaler.scale_y(y_train).view(-1, 1)
 y_val_t   = scaler.scale_y(y_val).view(-1, 1)
 y_test_t  = scaler.scale_y(y_test).view(-1, 1) # Implement differencing
 
+#print(f"X_val_t mean: {X_val_t.mean().item():.4f} (Should be ~0)")
+#print(f"X_val_t std:  {X_val_t.std().item():.4f} (Should be ~1)")
+#print(f"y_val_t mean: {y_val_t.mean().item():.4f} (Should be ~0)")
+#print(f"y_val_t std:  {y_val_t.std().item():.4f} (Should be ~1)")
+
 
 # Graph: EE(0) <-> FI(1), EE(0) <-> LV(2), LV(2) <-> LT(3)
 edge_index = torch.tensor([
-    [0, 1, 0, 2, 2, 3], # source nodes
-    [1, 0, 2, 0, 3, 2], # target nodes (bidirectional edges)
+    [0, 1, 0, 2, 2, 3],
+    [1, 0, 2, 0, 3, 2],
 ], dtype=torch.long)
 
 
@@ -210,95 +209,84 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 
 
 # ==================================================
-# STEP 4: TRAINING LOOP (IMPROVED)
+# STEP 4: TRAIN
 # ==================================================
 print("\n[4/6] Training...")
 
-# Setup optimizer and scheduler
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
-BATCH_SIZE = 64 #
-EPOCHS     = 50 #
 
-"""
-Val loss still falling at epoch 50  → increase EPOCHS
-Val loss flat from epoch 20 onwards → 50 was too many, use early stopping
-Val loss rises after epoch X        → overfitting, add more dropout or reduce hidden_dim
-"""
+optimizer  = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
+                                                          patience=5, factor=0.5)
+BATCH_SIZE = 64
+EPOCHS     = 50
 
-# Move edge_index to device ONCE before training
-edge_index = edge_index.to(device)
+train_losses, val_losses     = [], []
+best_val_loss, best_state    = float("inf"), None
 
-train_losses, val_losses = [], []
-best_val_loss = float("inf")
-# Initialize best_state with current weights as a fallback
-best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+# Check for NaNs in scaled tensors
+print(f"X_train_t contains NaNs: {torch.isnan(X_train_t).any()}")
+print(f"y_train_t contains NaNs: {torch.isnan(y_train_t).any()}")
+
+# Check for Zero Variance in features
+zero_std_features = (scaler.x_std == 0).any()
+if zero_std_features:
+    print("CRITICAL: Some features have 0 variance. This will cause NaNs.")
+    
+    
+# Identify the rows with NaNs
+nan_mask = system_h["available_energy"].isna()
+nan_data = system_h[nan_mask]["available_energy"]
+
+# Export to CSV to inspect in Excel/VS Code
+nan_data.to_csv("debug_nans.csv")
+
+print(f"  [DEBUG] Exported {len(nan_data)} rows with NaNs to 'debug_nans.csv'")
+    
+sys.exit(0) # Remove this after confirming no NaNs or zero-std features
 
 for epoch in range(EPOCHS):
     model.train()
-    perm = torch.randperm(len(X_train_t))
+    perm       = torch.randperm(len(X_train_t))
     epoch_loss = 0.0
-    n_batches = 0
+    n_batches  = 0
 
     for i in range(0, len(X_train_t), BATCH_SIZE):
         idx_b = perm[i:i + BATCH_SIZE]
-        xb = X_train_t[idx_b].to(device)
-        yb = y_train_t[idx_b].to(device)
+        xb    = X_train_t[idx_b].to(device)
+        yb    = y_train_t[idx_b].to(device)
 
         optimizer.zero_grad()
-        
-        # Forward pass
-        preds = model(xb, edge_index)
-        loss = helper.quantile_loss(preds, yb)
-        
-        # Check for NaN loss (prevents model corruption)
-        if torch.isnan(loss):
-            print(f"  [!] NaN loss detected at epoch {epoch+1}, batch {i}. Check your inputs!")
-            continue
-
+        loss = helper.quantile_loss(model(xb, edge_index), yb)
         loss.backward()
-        
-        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
         optimizer.step()
         epoch_loss += loss.item()
-        n_batches += 1
+        n_batches  += 1
 
-    # Validation Phase
     model.eval()
     val_losses_b = []
     with torch.no_grad():
         for i in range(0, len(X_val_t), BATCH_SIZE):
-            xb_v = X_val_t[i:i + BATCH_SIZE].to(device)
-            yb_v = y_val_t[i:i + BATCH_SIZE].to(device)
-            
-            v_preds = model(xb_v, edge_index)
-            v_loss = helper.quantile_loss(v_preds, yb_v)
-            val_losses_b.append(v_loss.item())
-    
-    avg_train_loss = epoch_loss / max(n_batches, 1)
-    avg_val_loss = np.mean(val_losses_b)
+            xb = X_val_t[i:i + BATCH_SIZE].to(device)
+            yb = y_val_t[i:i + BATCH_SIZE].to(device)
+            val_losses_b.append(helper.quantile_loss(model(xb, edge_index), yb).item())
+    val_loss = np.mean(val_losses_b)
 
-    train_losses.append(avg_train_loss)
-    val_losses.append(avg_val_loss)
-    
-    # Adjust learning rate based on validation performance
-    scheduler.step(avg_val_loss)
+    train_losses.append(epoch_loss / n_batches)
+    val_losses.append(val_loss)
+    scheduler.step(val_loss)
 
-    # Save best model
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        best_state    = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-    if (epoch + 1) % 5 == 0 or epoch == 0:
-        print(f"  Epoch {epoch+1:3d}: train_loss={avg_train_loss:.4f} | "
-              f"val_loss={avg_val_loss:.4f} | lr={optimizer.param_groups[0]['lr']:.6f}")
+    if (epoch + 1) % 5 == 0:
+        print(f"  Epoch {epoch+1:3d}: train={train_losses[-1]:.4f}  "
+              f"val={val_losses[-1]:.4f}")
 
-# Load the best performing weights back into the model
 model.load_state_dict(best_state)
-print(f"  Training complete. Best Val Loss: {best_val_loss:.4f}")
+print(f"  Best val loss: {best_val_loss:.4f}")
 
 # ==================================================
 # STEP 5: EVALUATE + SCENARIOS
@@ -307,12 +295,7 @@ print("\n[5/6] Evaluating on January 2026...")
 
 model.eval()
 with torch.no_grad():
-    # Ensure test data is on the correct device
-    X_test_device = X_test_t.to(device)
-    # Get predictions and move back to CPU for numpy/plotting
-    test_preds = model(X_test_device, edge_index).cpu().numpy()
-
-print(f"  Predictions generated for {len(test_preds)} samples.")
+    test_preds = model(X_test_t.to(device), edge_index).cpu().numpy()
 
 p10    = scaler.inverse_y(test_preds[:, 0])
 p50    = scaler.inverse_y(test_preds[:, 1])
