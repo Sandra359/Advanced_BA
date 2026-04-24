@@ -33,5 +33,6 @@ class PowerScaler:
         return (tensor * self.x_std) + self.x_mean
 
     def inverse_y(self, tensor):
-        """Returns y/predictions to original units (e.g., MW)"""
-        return (tensor * self.y_std) + self.y_mean
+        y_std  = float(self.y_std)
+        y_mean = float(self.y_mean)
+        return (tensor * y_std) + y_mean
