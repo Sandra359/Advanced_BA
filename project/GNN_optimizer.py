@@ -1,3 +1,5 @@
+import torch
+
 class EarlyStopping:
     """
     Stops training when validation loss stops improving.
