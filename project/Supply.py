@@ -13,7 +13,7 @@ import power_scaler as ps
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2026
 START = "2019-01-01T00:00:00.000Z"
-END   = "2026-01-01T00:00:00.000Z"
+END   = "2026-02-01T00:00:00.000Z"
 
 df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
 df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
@@ -203,19 +203,6 @@ x_std        = scaler.x_std.to(device)
 print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}")
 
 
-
-# ==================================================
-# STEP 4: TRAIN
-# ==================================================
-print("\n[4/6] Training...")
-
-
-
-optimizer  = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
-scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer,
-                                                          patience=5, factor=0.5)
-BATCH_SIZE = 64
-EPOCHS     = 50
 
 # ==================================================
 # STEP 4: TRAINING LOOP (IMPROVED)
