@@ -9,6 +9,7 @@ import torch_geometric.nn as gnn
 import matplotlib.pyplot as plt
 import sys
 import power_scaler as ps
+import  GNN_optimzer as opt
 
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2026
@@ -33,7 +34,7 @@ df_weather = helper.get_weather_openmeteo(
 df_prices_hourly  = df_prices.resample("h").mean() # The data is mostly per 15 minutes and some are hourly
 df_flows_hourly   = df_flows.resample("h").mean().fillna(0) # The data is only hourly but resampling to be sure for alignment
 df_system_hourly  = df_system.resample("h").mean() # Mostly per 5 minutes, some entries are 0:00 (maybe missing?) and 5 minutes
-df_weather_hourly = df_weather.resample("h").mean().reindex(idx, method="ffill")
+df_weather_hourly = df_weather.resample("h").mean()
 
 # --- 4. merge into one wide dataframe ---
 
@@ -59,10 +60,10 @@ flows_h  = df_flows_hourly.copy()
 system_h = df_system_hourly.copy()
 weather_h = df_weather_hourly.copy()
 
-idx      = prices_h.index
-flows_h  = flows_h.reindex(idx, method="ffill")
-system_h = system_h.reindex(idx, method="ffill")
-weather_h = weather_h.reindex(idx, method="ffill")
+idx       = prices_h.index
+flows_h   = flows_h.reindex(idx, method="ffill")
+system_h  = system_h.reindex(idx, method="ffill")
+weather_h = df_weather_hourly.reindex(idx, method="ffill")  # reindex here — idx now defined
 # True energy balance: production + all imports - consumption
 # Positive = surplus, Negative = real deficit even after imports
 system_h["available_energy"] = (
@@ -103,8 +104,8 @@ ee_feats = pd.DataFrame({
     "available_energy":     system_h["available_energy"],
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
-    "flow_fi":              flows_h["ee_fi"],
-    "flow_lv":              flows_h["ee_lv"],
+    "flow_fi":              flows_h[("ee", "fi")],
+    "flow_lv":              flows_h[("ee", "lv")],
     "price":                prices_h["ee"],
     "temperature":          weather_h["temperature"],    # ← now active
     "wind_speed_10m":       weather_h["wind_speed_10m"], # ← now active
@@ -145,11 +146,13 @@ node_data = np.stack([
 NUM_NODES     = 4
 NUM_FEATURES  = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
-SUPPLY_IDX = FEATURE_NAMES.index("available_energy")  # target is the true energy balance in Estonia (production + imports)
-FLOW_FI_IDX   = FEATURE_NAMES.index("flow_fi")
-FLOW_LV_IDX   = FEATURE_NAMES.index("flow_lv")
-RENEW_IDX     = FEATURE_NAMES.index("production_renewable")
-PROD_IDX      = FEATURE_NAMES.index("production")
+SUPPLY_IDX  = FEATURE_NAMES.index("available_energy")
+FLOW_FI_IDX = FEATURE_NAMES.index("flow_fi")
+FLOW_LV_IDX = FEATURE_NAMES.index("flow_lv")
+RENEW_IDX   = FEATURE_NAMES.index("production_renewable")
+PROD_IDX    = FEATURE_NAMES.index("production")
+TEMP_IDX    = FEATURE_NAMES.index("temperature")      # ← new
+WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")   # ← new
 
 
 
@@ -222,36 +225,38 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 
 
 # ==================================================
-# STEP 4: TRAINING LOOP (IMPROVED)
+# STEP 4: TRAINING LOOP
 # ==================================================
 print("\n[4/6] Training...")
 
-# Setup optimizer and scheduler
+
+# ── Optimizer / scheduler / hyperparameters ──────────────────────────────────
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
-BATCH_SIZE = 64 #
-EPOCHS     = 50 #
+BATCH_SIZE = 64
+EPOCHS     = 200   # upper bound — early stopping will terminate well before this
 
 """
-Val loss still falling at epoch 50  → increase EPOCHS
-Val loss flat from epoch 20 onwards → 50 was too many, use early stopping
-Val loss rises after epoch X        → overfitting, add more dropout or reduce hidden_dim
+Diagnostics after training:
+  Val loss still falling at last epoch  → raise EPOCHS (shouldn't happen with patience=15)
+  Val loss flat / rising after epoch X  → early stopping working as intended
+  Large train/val gap throughout        → more dropout or smaller hidden_dim
 """
 
-# Move edge_index to device ONCE before training
+early_stopping = opt.EarlyStopping(patience=15, min_delta=1e-4, path="best_stgnn.pt")
+
+# Move edge_index to device ONCE before the loop
 edge_index = edge_index.to(device)
 
 train_losses, val_losses = [], []
-best_val_loss = float("inf")
-# Initialize best_state with current weights as a fallback
-best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
 for epoch in range(EPOCHS):
+    # ── Train ─────────────────────────────────────────────────────────────────
     model.train()
     perm = torch.randperm(len(X_train_t))
     epoch_loss = 0.0
-    n_batches = 0
+    n_batches  = 0
 
     for i in range(0, len(X_train_t), BATCH_SIZE):
         idx_b = perm[i:i + BATCH_SIZE]
@@ -259,58 +264,49 @@ for epoch in range(EPOCHS):
         yb = y_train_t[idx_b].to(device)
 
         optimizer.zero_grad()
-        
-        # Forward pass
         preds = model(xb, edge_index)
-        loss = helper.quantile_loss(preds, yb)
-        
-        # Check for NaN loss (prevents model corruption)
+        loss  = helper.quantile_loss(preds, yb)
+
         if torch.isnan(loss):
-            print(f"  [!] NaN loss detected at epoch {epoch+1}, batch {i}. Check your inputs!")
+            print(f"  [!] NaN loss at epoch {epoch+1}, batch {i}. Skipping batch.")
             continue
 
         loss.backward()
-        
-        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        
         optimizer.step()
         epoch_loss += loss.item()
-        n_batches += 1
+        n_batches  += 1
 
-    # Validation Phase
+    # ── Validate ──────────────────────────────────────────────────────────────
     model.eval()
     val_losses_b = []
     with torch.no_grad():
         for i in range(0, len(X_val_t), BATCH_SIZE):
             xb_v = X_val_t[i:i + BATCH_SIZE].to(device)
             yb_v = y_val_t[i:i + BATCH_SIZE].to(device)
-            
-            v_preds = model(xb_v, edge_index)
-            v_loss = helper.quantile_loss(v_preds, yb_v)
+            v_loss = helper.quantile_loss(model(xb_v, edge_index), yb_v)
             val_losses_b.append(v_loss.item())
-    
+
     avg_train_loss = epoch_loss / max(n_batches, 1)
-    avg_val_loss = np.mean(val_losses_b)
+    avg_val_loss   = np.mean(val_losses_b)
 
     train_losses.append(avg_train_loss)
     val_losses.append(avg_val_loss)
-    
-    # Adjust learning rate based on validation performance
+
     scheduler.step(avg_val_loss)
 
-    # Save best model
-    if avg_val_loss < best_val_loss:
-        best_val_loss = avg_val_loss
-        best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-
     if (epoch + 1) % 5 == 0 or epoch == 0:
-        print(f"  Epoch {epoch+1:3d}: train_loss={avg_train_loss:.4f} | "
-              f"val_loss={avg_val_loss:.4f} | lr={optimizer.param_groups[0]['lr']:.6f}")
+        print(f"  Epoch {epoch+1:3d}: train={avg_train_loss:.4f} | "
+              f"val={avg_val_loss:.4f} | lr={optimizer.param_groups[0]['lr']:.6f}")
 
-# Load the best performing weights back into the model
-model.load_state_dict(best_state)
-print(f"  Training complete. Best Val Loss: {best_val_loss:.4f}")
+    early_stopping.step(avg_val_loss, model, epoch + 1)
+    if early_stopping.stop:
+        print(f"\n  Early stopping triggered after epoch {epoch+1}.")
+        break
+
+# Restore the best checkpoint before evaluation
+model = early_stopping.load_best(model)
+print(f"  Training complete. Best val loss: {early_stopping.best_loss:.4f}")
 
 # ==================================================
 # STEP 5: EVALUATE + SCENARIOS
