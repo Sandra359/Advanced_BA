@@ -1,0 +1,49 @@
+Event,Infrastructure,Available,Unavailable,Event Start,Event Stop,Duration,Fuel Type,Assets,Published,Remarks,Revision,Status,Cancellation Reason,text,event_family,unavail_sum,event_date,score,short_label
+"Other market information, Market Information",LV,,,2025-02-05 00:00:00,2027-02-05,2 years,,Rigas TEC2,2026-02-03 08:31:17,"Both units of power plant CHP-2 are  separately qualified to provide balancing capacity services to the TSO and will participate in the Baltic balancing capacity market starting from February 5, 2025, 00:00 CET. 
+
+The TSO's acceptance of capacity bids from power plant CHP-2  will result in submitting non-price-forming orders in the Day-Ahead auction and limiting sell volume in the amount of allocated capacity by the TSO. 
+
+Units are unavailable for BBCM during start-up. Simultaneous bid from both units to BBCM is not available.",3,Active,,"LV | Rigas TEC2 | Both units of power plant CHP-2 are  separately qualified to provide balancing capacity services to the TSO and will participate in the Baltic balancing capacity market starting from February 5, 2025, 00:00 CET. 
+
+The TSO's acceptance of capacity bids from power plant CHP-2  will result in submitting non-price-forming orders in the Day-Ahead auction and limiting sell volume in the amount of allocated capacity by the TSO. 
+
+Units are unavailable for BBCM during start-up. Simultaneous bid from both units to BBCM is not available.",market_info,0.0,2025-02-05,160.0,CHP-2 balancing
+"Other market information, Market Information",EE | Kiisa emergency power plant,,,2025-04-24 00:00:00,,"11 months,10 days,12 hours,3 minutes",,"Kiisa AREJ,Kiisa AREJ2",2025-04-23 14:03:35,"Starting from the balancing capacity auction on the 24th of April (delivery 25th of April), Kiisa emergency power plant complex will be used in full available amount (250 MW upwards and 40 MW downwards) as demand reduction resources in  the Baltic balancing capacity market.",1,Active,,"EE | Kiisa emergency power plant | Kiisa AREJ,Kiisa AREJ2 | Starting from the balancing capacity auction on the 24th of April (delivery 25th of April), Kiisa emergency power plant complex will be used in full available amount (250 MW upwards and 40 MW downwards) as demand reduction resources in  the Baltic balancing capacity market.",market_info,0.0,2025-04-24,160.0,Kiisa balancing
+"Other market information, Market Information","EE | Auvere, Balti, Estonian",,,2025-05-08 10:00:00,2035-01-01,"9 years,7 months,23 days,14 hours",,"Auvere G1,Eesti G3,Eesti G4,Eesti G5,Eesti G6,Eesti G8,Balti G11",2025-11-28 15:01:50,"Installed capacity of Auvere generation unit was revised after the major maintenance and increased by 10 MW.
+The installed capacity of generation units has been re-estimated based on the current technical condition of the production units and operational constraints. 
+The updated values are provided below:
+
+Estonian power plant (38W-MT--EEJ----3)
+Estonian G3 (38W-MT--EEJG3--D): 130 MW (-33 MW)
+Estonian G4 (38W-MT--EEJG4--9): 135 MW (-28 MW)
+Estonian G5 (38W-MT--EEJG5--5): 155 MW (-18 MW
+Estonian G6 (38W-MT--EEJG6--1): 165 MW (-8 MW)
+Estonian G8 (38W-MT--EEJG8--U): 185 MW (-9 MW)
+
+Balti power plant (38W-MT--BEJ----R)
+Balti G11 (38W-MT--BEJG11-2): 185 MW (-7 MW)
+
+Auvere power plant (38W-KTJ-AUVERE-Z):
+Auvere G-1 (38W-KTJ-AUV-G1-8): 270 MW (+10 MW)
+
+Active UMM events will be re-published with updated values of the units installed capacities.",2,Active,,"EE | Auvere, Balti, Estonian | Auvere G1,Eesti G3,Eesti G4,Eesti G5,Eesti G6,Eesti G8,Balti G11 | Installed capacity of Auvere generation unit was revised after the major maintenance and increased by 10 MW.
+The installed capacity of generation units has been re-estimated based on the current technical condition of the production units and operational constraints. 
+The updated values are provided below:
+
+Estonian power plant (38W-MT--EEJ----3)
+Estonian G3 (38W-MT--EEJG3--D): 130 MW (-33 MW)
+Estonian G4 (38W-MT--EEJG4--9): 135 MW (-28 MW)
+Estonian G5 (38W-MT--EEJG5--5): 155 MW (-18 MW
+Estonian G6 (38W-MT--EEJG6--1): 165 MW (-8 MW)
+Estonian G8 (38W-MT--EEJG8--U): 185 MW (-9 MW)
+
+Balti power plant (38W-MT--BEJ----R)
+Balti G11 (38W-MT--BEJG11-2): 185 MW (-7 MW)
+
+Auvere power plant (38W-KTJ-AUVERE-Z):
+Auvere G-1 (38W-KTJ-AUV-G1-8): 270 MW (+10 MW)
+
+Active UMM events will be re-published with updated values of the units installed capacities.",market_info,0.0,2025-05-08,160.0,Auvere revision
+"Other market information, Market Information",LV | CHP-1,,,2025-05-28 00:00:00,2027-02-05,"1 year,8 months,8 days",,,2026-02-03 08:31:16," Power plant CHP-1 is qualified to provide balancing capacity services to the TSO and will participate in the Baltic balancing capacity market starting from May 28, 2025, 00:00 CET. The TSO's acceptance of capacity bids from power plant CHP-1 will result in submitting non-price-forming orders in the Day-Ahead auction and limiting sell volume in the amount of allocated capacity by the TSO.",2,Active,,"LV | CHP-1 |  |  Power plant CHP-1 is qualified to provide balancing capacity services to the TSO and will participate in the Baltic balancing capacity market starting from May 28, 2025, 00:00 CET. The TSO's acceptance of capacity bids from power plant CHP-1 will result in submitting non-price-forming orders in the Day-Ahead auction and limiting sell volume in the amount of allocated capacity by the TSO.",market_info,0.0,2025-05-28,160.0,CHP-1 balancing
+"Other market information, Market Information",,,,2025-10-01 00:00:00,,"6 months,2 days,12 hours,3 minutes",,Herrenwyk-Kruseberg (Baltic cable),2025-09-24 09:36:53,The ramping limit for Baltic Cable (SE4-DE interconnector) will be adjusted for the transition from 60 min Market Time Unit (MTU) to 15 min MTU in the Energy Market SDAC. The ramping limitation will be changed from 600 MW between MTUs to 300 MW between MTUs. The change of ramping will be adjusted from trading day 30th of September 2025 for the delivery day 1st of October 2025.,1,Active,, | Herrenwyk-Kruseberg (Baltic cable) | The ramping limit for Baltic Cable (SE4-DE interconnector) will be adjusted for the transition from 60 min Market Time Unit (MTU) to 15 min MTU in the Energy Market SDAC. The ramping limitation will be changed from 600 MW between MTUs to 300 MW between MTUs. The change of ramping will be adjusted from trading day 30th of September 2025 for the delivery day 1st of October 2025.,market_info,0.0,2025-10-01,160.0,"Other market information, "
+"Other market information, Market Information",LV | AST BESS ,,,2025-10-22 23:00:00,,"5 months,11 days,13 hours,3 minutes",,"AST BESS 1 Tumē,AST BESS 2 Rēzeknē",2025-10-17 15:29:31,"Starting from October 23rd (with delivery on October 24th), the battery energy storage system operated by AS ""Augstsprieguma tīkls"" will be utilized at full available capacity (40 MW upwards and 40 MW downwards) as an FCR and aFRR demand reduction resource in the Baltic balancing capacity market.",2,Dismissed,change of dates,"LV | AST BESS  | AST BESS 1 Tumē,AST BESS 2 Rēzeknē | Starting from October 23rd (with delivery on October 24th), the battery energy storage system operated by AS ""Augstsprieguma tīkls"" will be utilized at full available capacity (40 MW upwards and 40 MW downwards) as an FCR and aFRR demand reduction resource in the Baltic balancing capacity market.",market_info,0.0,2025-10-22,160.0,AST BESS activation
