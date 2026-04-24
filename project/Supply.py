@@ -20,7 +20,7 @@ df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
 df_system = helper.fetch_all(helper.get_system_production, START, END)
 
 # Simple — just fetch weather for one central Estonian location - we assume that it is representative for the whole country for now, but we can add more locations later if needed
-df_weather = helper.get_weather_history(
+df_weather = helper.get_weather_openmeteo(
     lat=58.90,  # central Estonia / Pärnu area
     lon=24.75,
     start=START,
