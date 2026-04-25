@@ -99,9 +99,33 @@ for col in essential_cols:
 freq_deviation = (system_h["frequency"] - 50.0)
 
 
+# Define horizon early so we can use it for the lagged feature below
+HORIZON = 24   # predict 24h ahead (also defined again in STEP 2 — consistent)
+
+# ── Flow sign diagnostic ─────────────────────────────────────────────────────
+# The Elering API convention: positive = EE exports, negative = EE imports.
+# available_energy = production - exports + imports
+#                  = production - flow_ee_fi - flow_ee_lv - flow_ee_ru_*
+# works ONLY when flows are positive for exports and negative for imports.
+# Quick sanity check: on average EE imports from FI, so mean(flow_fi) should
+# be negative. If it is positive, flip the sign in the formula above.
+print("[DIAGNOSTIC] Mean flow EE→FI (should be negative if EE is net importer from FI):",
+      flows_h[("ee", "fi")].mean().round(1))
+print("[DIAGNOSTIC] Mean flow EE→LV (should be negative if EE imports from LV):",
+      flows_h[("ee", "lv")].mean().round(1))
+# If both means are positive, EE is a net exporter to those countries, which is
+# plausible. If unexpected, swap the formula sign.
+# ─────────────────────────────────────────────────────────────────────────────
+
 # EE node: full feature set
+# FIX: available_energy kept but lagged by HORIZON (24h).
+# Removing it entirely hurt badly — lagged balance is a genuinely informative
+# signal. But using it unlagged caused the model to partially "copy" recent
+# values that overlap with the target window. Shifting by 24h ensures the
+# model only sees energy balance from before the prediction horizon,
+# preserving the predictive signal without any target leakage.
 ee_feats = pd.DataFrame({
-    "available_energy":     system_h["available_energy"],
+    "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
     "flow_fi":              flows_h[("ee", "fi")],
@@ -146,13 +170,13 @@ node_data = np.stack([
 NUM_NODES     = 4
 NUM_FEATURES  = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
-SUPPLY_IDX  = FEATURE_NAMES.index("available_energy")
+SUPPLY_IDX  = FEATURE_NAMES.index("available_energy_lag24")
 FLOW_FI_IDX = FEATURE_NAMES.index("flow_fi")
 FLOW_LV_IDX = FEATURE_NAMES.index("flow_lv")
 RENEW_IDX   = FEATURE_NAMES.index("production_renewable")
 PROD_IDX    = FEATURE_NAMES.index("production")
-TEMP_IDX    = FEATURE_NAMES.index("temperature")      # ← new
-WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")   # ← new
+TEMP_IDX    = FEATURE_NAMES.index("temperature")
+WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")
 
 
 
@@ -162,7 +186,6 @@ WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")   # ← new
 print("\n[2/6] Creating sequences...")
 
 SEQ_LEN = 48   # 2 days of hourly history
-HORIZON = 24   # predict 24h ahead
 
 y_target_values = system_h["available_energy"].values
 
@@ -215,7 +238,7 @@ device = torch.device(
     "cuda" if torch.cuda.is_available() else
     ("mps"  if torch.backends.mps.is_available() else "cpu")
 )
-model      = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
+model      = STGNN(NUM_FEATURES, hidden_dim=64).to(device)  # FIX: was 32, increased for better capacity
 edge_index = edge_index.to(device)
 x_mean       = scaler.x_mean.to(device)
 x_std        = scaler.x_std.to(device)
@@ -231,7 +254,7 @@ print("\n[4/6] Training...")
 
 
 # ── Optimizer / scheduler / hyperparameters ──────────────────────────────────
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-5)
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-3)  # FIX: lr lowered 1e-3→5e-4 for more stable val loss
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
 BATCH_SIZE = 64
@@ -322,6 +345,11 @@ with torch.no_grad():
 
 print(f"  Predictions generated for {len(test_preds)} samples.")
 
+# Load wind production scenarios from counterfactual analysis
+wind_scenarios = pd.read_csv("../data/wind_production_scenarios.csv", index_col=0, parse_dates=True)
+wind_scenA = wind_scenarios["wind_mwh_scenA"].values
+wind_scenB = wind_scenarios["wind_mwh_scenB"].values
+
 p10    = scaler.inverse_y(test_preds[:, 0])
 p50    = scaler.inverse_y(test_preds[:, 1])
 p90    = scaler.inverse_y(test_preds[:, 2])
@@ -345,8 +373,7 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     """
     isolate:        remove ALL cross-border edges and zero import flows
     wind_series:    np.array (T,) of simulated wind production in MW
-                    → plug in real OpenWeather-derived series when ready
-    extra_wind_mw:  flat MW addition (used until wind_series is available)
+                    → plug in real OpenWeather-derived series
     """
     edges = edge_index.clone()
     x_mod = X_test_t.clone().cpu()   # work on CPU for modification
@@ -425,39 +452,28 @@ p50_s2, p10_s2, p90_s2 = run_scenario(
     "S2: Full isolation — no cross-border connections",
     isolate=True)
 
-# S3: placeholder — replace extra_wind_mw with wind_series when ready
-# -----------------------------------------------------------------------
-# When OpenWeather wind simulation is ready, call like this instead:
-#   p50_s3, p10_s3, p90_s3 = run_scenario(
-#       "S3: Isolated + simulated wind farms",
-#       isolate=True,
-#       wind_series=your_simulated_wind_array)  # shape (n_test_hours,)
-# -----------------------------------------------------------------------
 p50_s3, p10_s3, p90_s3 = run_scenario(
-    "S3: Isolated + 500 MW wind [PLACEHOLDER — replace with simulated series]",
+    "S3: Isolated + Scenario A (established plans)",
     isolate=True,
-    extra_wind_mw=500)
+    wind_series=wind_scenA)
 
 p50_s4, p10_s4, p90_s4 = run_scenario(
-    "S4: Isolated + 1000 MW wind [PLACEHOLDER]",
+    "S4: Isolated + Scenario B (pipeline farms)",
     isolate=True,
-    extra_wind_mw=1000)
+    wind_series=wind_scenB)
 
-p50_s5, p10_s5, p90_s5 = run_scenario(
-    "S5: Isolated + 2000 MW wind [PLACEHOLDER]",
-    isolate=True,
-    extra_wind_mw=2000)
-
-# Additional wind capacity analysis (isolated scenario) — how much wind would be needed to break even with the full grid scenario?
-print("\n  --- Supply level by wind capacity (isolated) ---")
-for mw in [250, 500, 750, 1000, 1500, 2000]:
+'''
+# Additional wind capacity sensitivity analysis (isolated scenario) — varies with flat MW for reference
+print("\n  --- Supply level by flat wind addition (isolated) — for reference ---")
+for mw in [250, 500, 750, 1000]:
     p50_w, p10_w, _ = run_scenario(
-        f"Isolated + {mw} MW wind",
+        f"Isolated + {mw} MW wind (flat)",
         isolate=True,
         extra_wind_mw=mw
     )
     print(f"    {mw:5d} MW wind → mean supply: {p50_w.mean():+.0f} MW  "
           f"| min supply (P10): {p10_w.min():+.0f} MW")
+          '''
 # ==================================================
 # STEP 6: VISUALIZE
 # ==================================================
@@ -496,10 +512,10 @@ axes[0, 1].tick_params(axis="x", rotation=30)
 
 # Plot 3: scenario comparison over time
 # Plot 3: scenario supply comparison over time
-axes[1, 0].plot(jan_hours, p50_s1, lw=2,   color="green",  label="S1: Full grid")
-axes[1, 0].plot(jan_hours, p50_s2, lw=2,   color="red",    label="S2: Full isolation")
-axes[1, 0].plot(jan_hours, p50_s3, lw=1.5, color="orange", label="S3: Isolated + 500 MW wind")
-axes[1, 0].plot(jan_hours, p50_s4, lw=1.5, color="gold",   label="S4: Isolated + 1000 MW wind")
+axes[1, 0].plot(jan_hours, p50_s1, lw=2,   color="green",  label="Baseline")
+axes[1, 0].plot(jan_hours, p50_s2, lw=2,   color="red",    label="Isolated (no wind)")
+axes[1, 0].plot(jan_hours, p50_s3, lw=1.5, color="orange", label="Scenario A (established plans)")
+axes[1, 0].plot(jan_hours, p50_s4, lw=1.5, color="gold",   label="Scenario B (pipeline farms)")
 
 # Show the gap between S1 and S2 — this is the import dependency
 axes[1, 0].fill_between(jan_hours, p50_s1, p50_s2,
@@ -512,15 +528,15 @@ axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
 axes[1, 0].tick_params(axis="x", rotation=30)
 # Plot 4: mean available supply by scenario
-scenario_names = ["S1\nFull grid", "S2\nIsolated",
-                  "S3\n+500 MW", "S4\n+1000 MW", "S5\n+2000 MW"]
+scenario_names = ["Baseline", "Isolated\n(no wind)",
+                  "Scenario A\n(established)", "Scenario B\n(pipeline)"]
 mean_supply = [p50_s1.mean(), p50_s2.mean(),
-               p50_s3.mean(), p50_s4.mean(), p50_s5.mean()]
+               p50_s3.mean(), p50_s4.mean()]
 min_supply  = [p10_s1.min(), p10_s2.min(),
-               p10_s3.min(), p10_s4.min(), p10_s5.min()]
-colors = ["green", "red", "orange", "gold", "limegreen"]
+               p10_s3.min(), p10_s4.min()]
+colors = ["green", "red", "orange", "gold"]
 
-x = np.arange(5)
+x = np.arange(4)
 bars = axes[1, 1].bar(x, mean_supply, 0.5, color=colors, alpha=0.8,
                       label="Mean available supply (P50)")
 axes[1, 1].scatter(x, min_supply, color="black", zorder=5,
@@ -547,5 +563,6 @@ plt.savefig("stgnn_resilience.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 print("\n✓ Complete! Saved to stgnn_resilience.png")
-print("\nNOTE: S3-S5 use flat MW wind placeholders.")
-print("Replace extra_wind_mw with wind_series= when simulated wind is ready.")
+print("\n✓ S3-S4 now use realistic wind production scenarios from ursula_wind_counterfactual.ipynb")
+print("  S3: Established plans (Lääneranna, Pärnu+Tori, Aidu) = +323 MW")
+print("  S4: Pipeline farms (Lääneranna, Tori, Lääne-Nigula, Põhja-Pärnumaa, Lüganuse) = +887 MW")
