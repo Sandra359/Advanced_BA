@@ -145,3 +145,111 @@ S4 is +887 MW because `scenB − baseline` covers all new farms: 323 MW (Scenari
 **Supply.py:** bar chart showing mean P50 available supply per scenario with a typical consumption reference line
 
 **Supply_wind.py:** grouped bar chart showing **deficit hours** (balance < 0 MW) and **severe deficit hours** (balance < −100 MW) per scenario — directly answers the resilience question rather than showing an always-positive average
+
+---
+
+## Change 10 — Target variable: `available_energy` → `production`
+
+**Supply.py / previous Supply_wind.py:**
+```python
+y_target_values = system_h["available_energy"].values
+```
+
+`available_energy = production − net_exports = production + net_imports ≈ consumption`
+
+Because Estonia imports heavily (flows are large and negative in the convention: `finland = −643 MW` on Jan 1, 2026), available_energy ≈ 1000–1100 MW and is always positive. The model learned to predict a near-constant positive value → 0 deficit hours under every scenario.
+
+**Supply_wind.py (updated):**
+```python
+y_target_values = system_h["production"].values
+```
+
+`production` = total domestic generation (~200–1300 MW), the actual supply side. Deficit is computed later in Monte Carlo as `production(GNN) − consumption(SARIMAX)`.
+
+**Why this matters:** Under isolation the model's input flows are zeroed, but if the target was `available_energy` (≈ consumption), training never exposed the model to deficits and it could not produce them. With `production` as target the model learns the correct supply level.
+
+---
+
+## Change 11 — Removed isolation SUPPLY_IDX flow correction
+
+**Previous Supply_wind.py:**
+```python
+fi_flow_orig = x_mod[:, :, 0, FLOW_FI_IDX].clone()
+lv_flow_orig = x_mod[:, :, 0, FLOW_LV_IDX].clone()
+x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
+...
+x_mod[:, :, 0, SUPPLY_IDX] += fi_flow_orig   # ← adjusting available_energy_lag24
+x_mod[:, :, 0, SUPPLY_IDX] += lv_flow_orig
+```
+
+**Supply_wind.py (updated):** the `SUPPLY_IDX` adjustment lines are removed.
+
+**Why:** `production` does not depend on cross-border flows — Estonia's plants produce the same amount regardless of what is exported or imported. The correction only made sense when the target was `available_energy` (which does depend on flows). Removing it keeps the feature space consistent with the new target.
+
+---
+
+## Change 12 — Data caching: skip API on re-runs
+
+**Supply.py / previous Supply_wind.py:** full API fetch on every run (~2–5 minutes).
+
+**Supply_wind.py (updated):**
+```python
+CACHE_FILE = "data_cache.pkl"
+if os.path.exists(CACHE_FILE):
+    df_prices, df_flows, df_system, df_weather = pickle.load(...)
+else:
+    # fetch from API and pickle.dump(...)
+```
+
+First run fetches and caches. Every subsequent run skips all API calls and loads from disk in seconds. Delete `data_cache.pkl` to force a refresh.
+
+---
+
+## Change 13 — Model size and batch size
+
+| Parameter    | Supply.py | Supply_wind.py |
+|--------------|-----------|----------------|
+| `hidden_dim` | 64        | **32**         |
+| `BATCH_SIZE` | 64        | **256**        |
+
+`hidden_dim=32` reduces the parameter count ~4× and matched or beat `hidden_dim=64` on validation loss in test runs (less overfitting). `BATCH_SIZE=256` reduces the number of gradient steps per epoch ~4×, cutting training time proportionally. Early stopping (patience=15) ensures no wasted epochs.
+
+---
+
+## Change 14 — Restored `TEMP_IDX` and `WIND_IDX` constants
+
+**Previous Supply_wind.py:** accidentally omitted these two index constants that were present in Supply.py.
+
+**Supply_wind.py (updated):**
+
+```python
+TEMP_IDX = FEATURE_NAMES.index("temperature")
+WIND_IDX  = FEATURE_NAMES.index("wind_speed_10m")
+```
+
+These are needed for any downstream analysis that wants to inspect or modify the temperature or wind-speed feature slots directly.
+
+---
+
+## Change 15 — `available_energy` comment corrected
+
+**Supply.py / previous Supply_wind.py comment:**
+
+```python
+# True energy balance: production minus all net exports
+# positive = surplus, negative = deficit even after imports
+```
+
+This was wrong. Verified from Elering API (Jan 1, 2026, 00:00 UTC):
+
+- `production = 264 MW`, `consumption = 1047 MW`
+- `finland = −643 MW` (negative = EE importing)
+- `available_energy = 264 − (−643) − (−162) = 1069 MW ≈ consumption`
+
+**Supply_wind.py (updated) comment:**
+
+```python
+# available_energy = production + net imports ≈ consumption — always positive.
+# Kept only as a lagged contextual feature (available_energy_lag24).
+# Deficit is production − SARIMAX_consumption, computed in Monte Carlo.
+```

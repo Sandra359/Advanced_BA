@@ -1,4 +1,3 @@
-from datetime import datetime
 import os
 import pickle
 import pandas as pd
@@ -6,10 +5,7 @@ import helper_functions_GNN as helper
 from STGNN import STGNN
 import numpy as np
 import torch
-import torch.nn as nn
-import torch_geometric.nn as gnn
 import matplotlib.pyplot as plt
-import sys
 import power_scaler as ps
 import GNN_optimizer as opt
 
@@ -41,20 +37,6 @@ df_flows_hourly = df_flows.resample("h").mean().fillna(0)
 df_system_hourly = df_system.resample("h").mean()
 df_weather_hourly = df_weather.resample("h").mean()
 
-df_daily = pd.concat(
-    [
-        df_prices_hourly.add_prefix("price_"),
-        df_flows_hourly.add_prefix("flow_"),
-        df_system_hourly.add_prefix("system_"),
-        df_weather_hourly.add_prefix("weather_"),
-    ],
-    axis=1,
-).sort_index()
-
-flow_cols = [col for col in df_daily.columns if col.startswith("flow_")]
-df_daily[flow_cols] = df_daily[flow_cols].fillna(0)
-df_daily = df_daily.dropna(how="all")
-
 prices_h = df_prices_hourly.copy()
 flows_h = df_flows_hourly.copy()
 system_h = df_system_hourly.copy()
@@ -65,8 +47,11 @@ flows_h = flows_h.reindex(idx, method="ffill")
 system_h = system_h.reindex(idx, method="ffill")
 weather_h = df_weather_hourly.reindex(idx, method="ffill")
 
-# True energy balance: production minus all net exports
-# positive = surplus, negative = deficit even after imports
+# available_energy = production + net imports (negative flows = EE is importing).
+# This is approximately equal to consumption — it is always positive and is NOT
+# a deficit signal. It is kept only as a lagged contextual feature (24 h lag)
+# so the model can see typical load levels. The GNN target is production alone;
+# deficit is computed later in Monte Carlo as production − SARIMAX_consumption.
 system_h["available_energy"] = (
     system_h["production"]
     - flows_h[("ee", "fi")]
@@ -74,7 +59,9 @@ system_h["available_energy"] = (
     - flows_h[("ee", "ru_narva")]
     - flows_h[("ee", "ru_pihkva")]
 )
-print(f"    Hours without enough energy: {(system_h['available_energy'] < 0).sum()}")
+print(
+    f"    available_energy range: {system_h['available_energy'].min():.0f} – {system_h['available_energy'].max():.0f} MW  (≈ consumption, always positive)"
+)
 
 # Cyclic calendar features
 hour_sin = np.sin(2 * np.pi * idx.hour / 24)
@@ -113,7 +100,34 @@ entsoe = pd.read_csv(
     "../data/entsoe_production_hourly.csv", index_col=0, parse_dates=True
 )
 wind_mw = entsoe["wind_onshore"].reindex(idx, method="ffill").fillna(0)
-print(f"    wind_mw NaN count after reindex: {wind_mw.isna().sum()}")
+
+# ENTSOE data ends at 2025. For January 2026 (test period), load actual metered
+# wind from the 2026 ENTSOE file. Only January is used — later months are unreliable.
+_raw_2026 = pd.read_csv(
+    "../data/historical_production_data/"
+    "2026_AGGREGATED_GENERATION_PER_TYPE_GENERATION_202512312300-202612312300.csv"
+)
+_jan_wind = _raw_2026[
+    (_raw_2026["Production Type"] == "Wind Onshore")
+    & (_raw_2026["MTU (CET/CEST)"].str.startswith("01/"))
+].copy()
+_jan_wind["time"] = pd.to_datetime(
+    _jan_wind["MTU (CET/CEST)"].str.split(" - ").str[0],
+    format="%m/%d/%Y %H:%M:%S",
+)
+_jan_wind["time"] = _jan_wind["time"].dt.tz_localize("CET").dt.tz_convert("UTC")
+_jan_wind["Generation (MW)"] = pd.to_numeric(
+    _jan_wind["Generation (MW)"], errors="coerce"
+)
+_jan2026_wind_h = _jan_wind.set_index("time")["Generation (MW)"].resample("h").mean()
+
+_jan2026_mask = pd.DatetimeIndex(wind_mw.index).year == 2026
+wind_mw[_jan2026_mask] = _jan2026_wind_h.reindex(
+    wind_mw[_jan2026_mask].index, method="ffill"
+).fillna(0)
+print(
+    f"    wind_mw: ENTSOE actual for 2019-2025 + Jan 2026 ({_jan2026_mask.sum()} hours); Jan 2026 mean = {wind_mw[_jan2026_mask].mean():.1f} MW"
+)
 
 # EE node: full feature set
 # available_energy is lagged 24 h so the model can't trivially copy the most
@@ -237,7 +251,6 @@ device = torch.device(
 )
 model = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
 edge_index = edge_index.to(device)
-x_mean = scaler.x_mean.to(device)
 x_std = scaler.x_std.to(device)
 
 print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}")
@@ -256,7 +269,6 @@ BATCH_SIZE = 256
 EPOCHS = 200
 
 early_stopping = opt.EarlyStopping(patience=15, min_delta=1e-4, path="best_stgnn.pt")
-edge_index = edge_index.to(device)
 
 train_losses, val_losses = [], []
 
@@ -345,14 +357,13 @@ print(f"  Actual production range: {actual.min():.0f} – {actual.max():.0f} MW"
 # --------------------------------------------------
 # Scenario engine
 # --------------------------------------------------
-def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
+def run_scenario(name, isolate=False, wind_series=None):
     """
-    isolate:       remove ALL cross-border edges and zero import flows
-    wind_series:   np.array (T,) of ADDITIONAL hourly wind production in MW
-                   from NEW farms — not yet included in historical production.
-                   Injected into production_renewable, production,
-                   available_energy_lag24, and wind_mw (all consistently).
-    extra_wind_mw: flat MW for break-even sweep only
+    isolate:     remove ALL cross-border edges and zero import flows
+    wind_series: np.array (T,) of ADDITIONAL hourly wind production in MW
+                 from NEW farms only (delta vs baseline, not total wind).
+                 Injected into production_renewable, production,
+                 available_energy_lag24, and wind_mw using per-feature stds.
     """
     edges = edge_index.clone()
     x_mod = X_test_t.clone().cpu()
@@ -370,7 +381,6 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         # Each of the 4 affected features gets its own std for correct scaling.
         renew_std = x_std[0, 0, 0, RENEW_IDX].item()
         prod_std = x_std[0, 0, 0, PROD_IDX].item()
-        supply_std = x_std[0, 0, 0, SUPPLY_IDX].item()
         wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
 
         for t in range(len(x_mod)):
@@ -379,19 +389,10 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
                 wt = torch.from_numpy(w.astype(np.float32))
                 x_mod[t, :, 0, RENEW_IDX] += wt / renew_std
                 x_mod[t, :, 0, PROD_IDX] += wt / prod_std
-                x_mod[t, :, 0, SUPPLY_IDX] += wt / supply_std
                 x_mod[t, :, 0, WIND_MW_IDX] += wt / wind_mw_std
-
-    elif extra_wind_mw > 0:
-        renew_std = x_std[0, 0, 0, RENEW_IDX].item()
-        prod_std = x_std[0, 0, 0, PROD_IDX].item()
-        supply_std = x_std[0, 0, 0, SUPPLY_IDX].item()
-        wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
-        w = float(extra_wind_mw)
-        x_mod[:, :, 0, RENEW_IDX] += w / renew_std
-        x_mod[:, :, 0, PROD_IDX] += w / prod_std
-        x_mod[:, :, 0, SUPPLY_IDX] += w / supply_std
-        x_mod[:, :, 0, WIND_MW_IDX] += w / wind_mw_std
+                # SUPPLY_IDX (available_energy_lag24) is not adjusted here:
+                # it would require wind values shifted back 24h, adding complexity
+                # without material benefit since the target is production, not balance.
 
     with torch.no_grad():
         preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
@@ -400,15 +401,11 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     p50_s = scaler.inverse_y(preds[:, 1])
     p90_s = scaler.inverse_y(preds[:, 2])
 
-    deficit_h = (p50_s < 0).sum()
-    severe_h = (p50_s < -100).sum()
-
     if name:
         print(f"\n  {name}")
-        print(f"    Median production:   {p50_s.mean():+.0f} MW")
-        print(f"    Min production (P10):{p10_s.min():+.0f} MW")
-        print(f"    Hours prod < 0:      {deficit_h} / {len(p50_s)}")
-        print(f"    Hours prod < -100:   {severe_h}")
+        print(f"    Median production (P50): {p50_s.mean():.0f} MW")
+        print(f"    P10 range:               {p10_s.min():.0f} – {p10_s.max():.0f} MW")
+        print(f"    P90 range:               {p90_s.min():.0f} – {p90_s.max():.0f} MW")
 
     return p50_s, p10_s, p90_s
 
@@ -420,13 +417,17 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
 scenarios = pd.read_csv(
     "../data/wind_production_scenarios.csv", index_col=0, parse_dates=True
 )
-baseline = scenarios["wind_mwh_baseline"].values
-wind_scenA = (
-    scenarios["wind_mwh_scenA"] - scenarios["wind_mwh_baseline"]
-).values  # +323 MW new
-wind_scenB = (
-    scenarios["wind_mwh_scenB"] - scenarios["wind_mwh_baseline"]
-).values  # +887 MW new (323+564)
+# Delta = new farms only (not total wind, which is already in the model's wind_mw feature).
+# Prepend SEQ_LEN zeros so X_test[0]'s input window (Dec 30–31) gets zero injection —
+# new farms don't exist in December. Without this, Jan 1 wind would be injected into
+# Dec 30-31 sequence positions (temporal misalignment).
+_pad = np.zeros(SEQ_LEN)
+wind_scenA = np.concatenate(
+    [_pad, (scenarios["wind_mwh_scenA"] - scenarios["wind_mwh_baseline"]).values]
+)
+wind_scenB = np.concatenate(
+    [_pad, (scenarios["wind_mwh_scenB"] - scenarios["wind_mwh_baseline"]).values]
+)
 
 print("\n  --- Scenario comparison (January 2026) ---")
 
@@ -448,18 +449,17 @@ p50_s4, p10_s4, p90_s4 = run_scenario(
     wind_series=wind_scenB,
 )
 
-print("\n  --- Break-even: MW of flat wind needed for full isolation survival ---")
-for mw in [250, 500, 750, 1000, 1500, 2000]:
-    p50_w, _, _ = run_scenario("", isolate=True, extra_wind_mw=mw)
-    pct = (p50_w < 0).sum() / len(p50_w) * 100
-    print(f"    {mw:5d} MW wind → {pct:5.1f}% hours in deficit")
 
 # ==================================================
 # STEP 6: VISUALIZE
 # ==================================================
 print("\n[6/6] Visualizing...")
 
-jan_hours = pd.date_range("2026-01-01", periods=len(p50_s1), freq="h", tz="UTC").values
+# Derive actual prediction timestamps from the index rather than hardcoding Jan 1.
+# y_test[k] was built at loop t = SEQ_LEN + jan2026_start + k, targeting
+# idx[t + HORIZON - 1] = idx[SEQ_LEN + jan2026_start + k + HORIZON - 1].
+_ts_start = SEQ_LEN + jan2026_start + HORIZON - 1
+jan_hours = idx[_ts_start : _ts_start + len(y_test)]
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 fig.suptitle(
@@ -476,7 +476,6 @@ axes[0, 0].legend()
 axes[0, 0].grid(alpha=0.3)
 
 # Plot 2: S1 forecast vs actual
-axes[0, 1].axhline(0, color="black", lw=1, linestyle="--", label="0 MW (break-even)")
 axes[0, 1].fill_between(
     jan_hours, p10, p90, alpha=0.15, color="steelblue", label="P10–P90 band"
 )
@@ -491,8 +490,7 @@ axes[0, 1].legend(fontsize=8)
 axes[0, 1].grid(alpha=0.3)
 axes[0, 1].tick_params(axis="x", rotation=30)
 
-# Plot 3: scenario balance over time
-axes[1, 0].axhline(0, color="black", lw=1.2, linestyle="--", label="0 MW")
+# Plot 3: scenario production over time
 axes[1, 0].plot(jan_hours, p50_s1, lw=2, color="green", label="S1: Full grid")
 axes[1, 0].plot(jan_hours, p50_s2, lw=2, color="red", label="S2: Full isolation")
 axes[1, 0].plot(
@@ -501,12 +499,6 @@ axes[1, 0].plot(
 axes[1, 0].plot(
     jan_hours, p50_s4, lw=1.5, color="gold", label="S4: Isolated + 887 MW new"
 )
-axes[1, 0].fill_between(
-    jan_hours, p50_s2, 0, where=(p50_s2 < 0), alpha=0.12, color="red"
-)
-axes[1, 0].fill_between(
-    jan_hours, p50_s3, 0, where=(p50_s3 < 0), alpha=0.12, color="orange"
-)
 axes[1, 0].set_title("Production by Scenario")
 axes[1, 0].set_ylabel("Production (MW)")
 axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
@@ -514,39 +506,39 @@ axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
 axes[1, 0].tick_params(axis="x", rotation=30)
 
-# Plot 4: deficit hours bar chart
-labels = ["S1\nFull grid", "S2\nIsolated", "S3\n+323 MW", "S4\n+887 MW\nnew"]
-d_hours = [
-    (p50_s1 < 0).sum(),
-    (p50_s2 < 0).sum(),
-    (p50_s3 < 0).sum(),
-    (p50_s4 < 0).sum(),
+# Plot 4: mean production per scenario with P10–P90 range as error bars
+s_labels = ["S1\nFull grid", "S2\nIsolated", "S3\n+323 MW", "S4\n+887 MW"]
+s_colors = ["green", "red", "orange", "gold"]
+s_p50 = [p50_s1.mean(), p50_s2.mean(), p50_s3.mean(), p50_s4.mean()]
+s_err_lo = [
+    p50_s1.mean() - p10_s1.mean(),
+    p50_s2.mean() - p10_s2.mean(),
+    p50_s3.mean() - p10_s3.mean(),
+    p50_s4.mean() - p10_s4.mean(),
 ]
-s_hours = [
-    (p50_s1 < -100).sum(),
-    (p50_s2 < -100).sum(),
-    (p50_s3 < -100).sum(),
-    (p50_s4 < -100).sum(),
+s_err_hi = [
+    p90_s1.mean() - p50_s1.mean(),
+    p90_s2.mean() - p50_s2.mean(),
+    p90_s3.mean() - p50_s3.mean(),
+    p90_s4.mean() - p50_s4.mean(),
 ]
-colors = ["green", "red", "orange", "gold"]
 
 x = np.arange(4)
-axes[1, 1].bar(
-    x - 0.2, d_hours, 0.35, color=colors, alpha=0.8, label="Deficit hours (< 0 MW)"
-)
-axes[1, 1].bar(
-    x + 0.2,
-    s_hours,
-    0.35,
-    color=colors,
-    alpha=0.4,
-    hatch="//",
-    label="Severe deficit (< −100 MW)",
+axes[1, 1].bar(x, s_p50, 0.5, color=s_colors, alpha=0.75)
+axes[1, 1].errorbar(
+    x,
+    s_p50,
+    yerr=[s_err_lo, s_err_hi],
+    fmt="none",
+    color="black",
+    capsize=6,
+    lw=1.5,
+    label="P10–P90 range",
 )
 axes[1, 1].set_xticks(x)
-axes[1, 1].set_xticklabels(labels, fontsize=9)
-axes[1, 1].set_ylabel("Hours in January 2026")
-axes[1, 1].set_title("Resilience: Deficit Hours by Scenario")
+axes[1, 1].set_xticklabels(s_labels, fontsize=9)
+axes[1, 1].set_ylabel("Mean production (MW)")
+axes[1, 1].set_title("Mean Production by Scenario  (error bars = P10–P90)")
 axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(alpha=0.3, axis="y")
 
