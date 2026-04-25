@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import sys
 import power_scaler as ps
 import  GNN_optimizer as opt
+import os
 
 BASE = "https://dashboard.elering.ee/api"
 # Fetching data for 2019-2026
@@ -346,7 +347,9 @@ with torch.no_grad():
 print(f"  Predictions generated for {len(test_preds)} samples.")
 
 # Load wind production scenarios from counterfactual analysis
-wind_scenarios = pd.read_csv("../data/wind_production_scenarios.csv", index_col=0, parse_dates=True)
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
+wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
 wind_scenA = wind_scenarios["wind_mwh_scenA"].values
 wind_scenB = wind_scenarios["wind_mwh_scenB"].values
 
