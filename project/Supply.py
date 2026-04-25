@@ -383,7 +383,7 @@ print(f"  Max predicted supply (P90):  {p90.max():.1f} MW")
 # --------------------------------------------------
 # Scenario engine
 # --------------------------------------------------
-def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
+def run_scenario(name, isolate=False, wind_series=None):
     """
     isolate:        remove ALL cross-border edges and zero import flows
     wind_series:    np.array (T,) of simulated wind production in MW
@@ -429,6 +429,7 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
                 x_mod[t, :, 0, PROD_IDX] += wt / prod_std
                 x_mod[t, :, 0, SUPPLY_IDX] += wt / supply_std
                 x_mod[t, :, 0, WIND_MW_IDX] += wt / wind_mw_std
+                """
 
     elif extra_wind_mw > 0:
         renew_std = x_std[0, 0, 0, RENEW_IDX].item()
@@ -439,7 +440,8 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
         x_mod[:, :, 0, RENEW_IDX] += w / renew_std
         x_mod[:, :, 0, PROD_IDX] += w / prod_std
         x_mod[:, :, 0, SUPPLY_IDX] += w / supply_std
-        x_mod[:, :, 0, WIND_MW_IDX] += w / wind_mw_std
+        x_mod[:, :, 0, WIND_MW_IDX] += w / wind_mw_std"""
+    
     with torch.no_grad():
         preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
 
