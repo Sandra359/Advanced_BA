@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch_geometric.nn as gnn
 
+
 class STGNN(nn.Module):
     """
     Spatio-Temporal GNN for Estonian energy resilience.

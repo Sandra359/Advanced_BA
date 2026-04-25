@@ -117,6 +117,12 @@ print("[DIAGNOSTIC] Mean flow EE→LV (should be negative if EE imports from LV)
 # If both means are positive, EE is a net exporter to those countries, which is
 # plausible. If unexpected, swap the formula sign.
 # ─────────────────────────────────────────────────────────────────────────────
+#include wind production from OpenWeather in the features — we will also use it in the scenario engine to create a "renewable boom" scenario with higher wind production than historically observed. We can also experiment with using it as a feature only for the EE node, or for all nodes (FI/LV also have some wind, but we don't have good data for it — might add later if needed). For now we add it just for EE and set it to 0 for other nodes, but we can easily change this later if we want to experiment with adding some proxy wind features for the neighbouring countries as well.
+entsoe = pd.read_csv(
+    "../data/entsoe_production_hourly.csv", index_col=0, parse_dates=True
+)
+wind_mw = entsoe["wind_onshore"].reindex(idx, method="ffill").fillna(0)
+print(f"    wind_mw NaN count after reindex: {wind_mw.isna().sum()}")
 
 # EE node: full feature set
 # FIX: available_energy kept but lagged by HORIZON (24h).
@@ -129,6 +135,7 @@ ee_feats = pd.DataFrame({
     "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
     "production_renewable": system_h["production_renewable"],
     "production":           system_h["production"],
+    "wind_mw":              wind_mw,  # ENTSOE actual wind; already in production
     "flow_fi":              flows_h[("ee", "fi")],
     "flow_lv":              flows_h[("ee", "lv")],
     "price":                prices_h["ee"],
@@ -178,7 +185,10 @@ RENEW_IDX   = FEATURE_NAMES.index("production_renewable")
 PROD_IDX    = FEATURE_NAMES.index("production")
 TEMP_IDX    = FEATURE_NAMES.index("temperature")
 WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")
+WIND_MW_IDX = FEATURE_NAMES.index("wind_mw")  # ENTSOE wind MW feature index
 
+
+print(f"    Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 
 
 # ==================================================
@@ -340,19 +350,20 @@ print("\n[5/6] Evaluating on January 2026...")
 model.eval()
 with torch.no_grad():
     # Ensure test data is on the correct device
-    X_test_device = X_test_t.to(device)
+    #X_test_device = X_test_t.to(device)
     # Get predictions and move back to CPU for numpy/plotting
     test_preds = model(X_test_device, edge_index).cpu().numpy()
 
 print(f"  Predictions generated for {len(test_preds)} samples.")
 
+"""
 # Load wind production scenarios from counterfactual analysis
 current_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
 wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
 wind_scenA = wind_scenarios["wind_mwh_scenA"].values
 wind_scenB = wind_scenarios["wind_mwh_scenB"].values
-
+"""
 p10    = scaler.inverse_y(test_preds[:, 0])
 p50    = scaler.inverse_y(test_preds[:, 1])
 p90    = scaler.inverse_y(test_preds[:, 2])
@@ -405,37 +416,37 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     if wind_series is not None:
         # wind_series shape: (n_test_hours,) in MW
         # Normalize using training std for renewable feature
-        wind_std = x_std [0, 0, 0, RENEW_IDX].item()
+        renew_std = x_std[0, 0, 0, RENEW_IDX].item()
         prod_std = x_std[0, 0, 0, PROD_IDX].item()
+        supply_std = x_std[0, 0, 0, SUPPLY_IDX].item()
+        wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
 
         for t in range(len(x_mod)):
-            # The sequence window for sample t covers hours t to t+SEQ_LEN
-            # Add simulated wind into each hour of the window
-            wind_window = wind_series[t:t + SEQ_LEN]
-            if len(wind_window) == SEQ_LEN:
-                wind_norm = torch.from_numpy(
-                    wind_window.astype(np.float32) / wind_std
-                )
-                x_mod[t, :, 0, RENEW_IDX]    += wind_norm
-                x_mod[t, :, 0, PROD_IDX]     += wind_norm * (wind_std / prod_std)
-                x_mod[t, :, 0, SUPPLY_IDX]  += wind_norm
+            w = wind_series[t : t + SEQ_LEN]
+            if len(w) == SEQ_LEN:
+                wt = torch.from_numpy(w.astype(np.float32))
+                x_mod[t, :, 0, RENEW_IDX] += wt / renew_std
+                x_mod[t, :, 0, PROD_IDX] += wt / prod_std
+                x_mod[t, :, 0, SUPPLY_IDX] += wt / supply_std
+                x_mod[t, :, 0, WIND_MW_IDX] += wt / wind_mw_std
 
-    # Option B: flat MW addition (placeholder until wind_series is ready)
     elif extra_wind_mw > 0:
-        wind_std = x_std [0, 0, 0, RENEW_IDX].item()
+        renew_std = x_std[0, 0, 0, RENEW_IDX].item()
         prod_std = x_std[0, 0, 0, PROD_IDX].item()
-        wind_norm = extra_wind_mw / wind_std
-        prod_norm = extra_wind_mw / prod_std
-        x_mod[:, :, 0, RENEW_IDX]   += wind_norm
-        x_mod[:, :, 0, PROD_IDX]    += prod_norm
-        x_mod[:, :, 0, SUPPLY_IDX] += wind_norm
-
+        supply_std = x_std[0, 0, 0, SUPPLY_IDX].item()
+        wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
+        w = float(extra_wind_mw)
+        x_mod[:, :, 0, RENEW_IDX] += w / renew_std
+        x_mod[:, :, 0, PROD_IDX] += w / prod_std
+        x_mod[:, :, 0, SUPPLY_IDX] += w / supply_std
+        x_mod[:, :, 0, WIND_MW_IDX] += w / wind_mw_std
     with torch.no_grad():
         preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
 
     p10_s = scaler.inverse_y(preds[:, 0])
     p50_s = scaler.inverse_y(preds[:, 1])
     p90_s = scaler.inverse_y(preds[:, 2])
+
 
        
     print(f"\n  {name}")
@@ -444,6 +455,17 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     print(f"    Max available supply (P90):  {p90_s.max():+.0f} MW")
     print(f"    Supply reduction vs S1:      {p50_s1.mean() - p50_s.mean():+.0f} MW"
         if name != "S1: Full grid — all connections intact" else "")
+scenarios = pd.read_csv(
+    "../data/wind_production_scenarios.csv", index_col=0, parse_dates=True
+)
+
+baseline = scenarios["wind_mwh_baseline"].values
+wind_scenA = (
+    scenarios["wind_mwh_scenA"] - scenarios["wind_mwh_baseline"]
+).values  # +323 MW new
+wind_scenB = (
+    scenarios["wind_mwh_scenB"] - scenarios["wind_mwh_baseline"]
+).values  # +887 MW new (323+564)
 
 # --- Run scenarios ---
 print("\n  --- Scenario comparison (January 2026) ---")
