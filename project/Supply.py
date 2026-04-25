@@ -65,8 +65,7 @@ idx       = prices_h.index
 flows_h   = flows_h.reindex(idx, method="ffill")
 system_h  = system_h.reindex(idx, method="ffill")
 weather_h = df_weather_hourly.reindex(idx, method="ffill")  # reindex here — idx now defined
-# True energy balance: production + all imports - consumption
-# Positive = surplus, Negative = real deficit even after imports
+# True energy balance: production + all imports - 
 system_h["available_energy"] = (
     system_h["production"]
     - flows_h[("ee", "fi")]
@@ -334,8 +333,10 @@ coverage = np.mean((actual >= p10) & (actual <= p90))
 
 print(f"  MAE:              {mae:.1f} MW")
 print(f"  RMSE:             {rmse:.1f} MW")
-print(f"  P10-P90 coverage: {coverage*100:.1f}%  (target ≥ 80%)")
-print(f"  Actual deficit hours (Jan 2026): {(actual < 0).sum()}")
+print(f"  P10-P90 coverage: {coverage*100:.1f}%  (target ≥ 80%)") # We want our 80% prediction interval to actually cover the true value at least 80% of the time
+print(f"  Mean predicted supply (P50): {p50.mean():.1f} MW")
+print(f"  Min predicted supply (P10):  {p10.min():.1f} MW")
+print(f"  Max predicted supply (P90):  {p90.max():.1f} MW")
 
 # --------------------------------------------------
 # Scenario engine
@@ -406,15 +407,13 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     p50_s = scaler.inverse_y(preds[:, 1])
     p90_s = scaler.inverse_y(preds[:, 2])
 
-    deficit_h = (p50_s < 0).sum()
-    severe_h  = (p50_s < -100).sum()
-
+       
     print(f"\n  {name}")
-    print(f"    Median balance:      {p50_s.mean():+.0f} MW")
-    print(f"    Hours in deficit:    {deficit_h} / {len(p50_s)}")
-    print(f"    Severe deficit hrs:  {severe_h}  (< -100 MW)")
-    print(f"    Worst hour (P10):    {p10_s.min():+.0f} MW")
-    return p50_s, p10_s, p90_s
+    print(f"    Mean available supply (P50): {p50_s.mean():+.0f} MW")
+    print(f"    Min available supply (P10):  {p10_s.min():+.0f} MW")
+    print(f"    Max available supply (P90):  {p90_s.max():+.0f} MW")
+    print(f"    Supply reduction vs S1:      {p50_s1.mean() - p50_s.mean():+.0f} MW"
+        if name != "S1: Full grid — all connections intact" else "")
 
 # --- Run scenarios ---
 print("\n  --- Scenario comparison (January 2026) ---")
@@ -449,13 +448,16 @@ p50_s5, p10_s5, p90_s5 = run_scenario(
     isolate=True,
     extra_wind_mw=2000)
 
-# Break-even analysis: how much wind does Estonia need?
-print("\n  --- Break-even: MW of wind needed for full isolation survival ---")
+# Additional wind capacity analysis (isolated scenario) — how much wind would be needed to break even with the full grid scenario?
+print("\n  --- Supply level by wind capacity (isolated) ---")
 for mw in [250, 500, 750, 1000, 1500, 2000]:
-    p50_w, _, _ = run_scenario(f"", isolate=True, extra_wind_mw=mw)
-    pct = (p50_w < 0).sum() / len(p50_w) * 100
-    print(f"    {mw:5d} MW wind → {pct:5.1f}% hours in deficit")
-
+    p50_w, p10_w, _ = run_scenario(
+        f"Isolated + {mw} MW wind",
+        isolate=True,
+        extra_wind_mw=mw
+    )
+    print(f"    {mw:5d} MW wind → mean supply: {p50_w.mean():+.0f} MW  "
+          f"| min supply (P10): {p10_w.min():+.0f} MW")
 # ==================================================
 # STEP 6: VISUALIZE
 # ==================================================
@@ -484,7 +486,7 @@ axes[0, 1].plot(jan_hours, p50,    lw=2,   color="steelblue", label="P50 forecas
 axes[0, 1].plot(jan_hours, actual, lw=1.5, color="red",
                 linestyle="--", label="Actual balance")
 axes[0, 1].fill_between(jan_hours, p50, 0,
-    where=(p50 < 0), alpha=0.25, color="red", label="Predicted deficit")
+    where=(p50 < 0), alpha=0.25, color="red", label="Predicted supply")
 axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
 axes[0, 1].set_ylabel("Energy balance (MW)")
 axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
@@ -493,41 +495,50 @@ axes[0, 1].grid(alpha=0.3)
 axes[0, 1].tick_params(axis="x", rotation=30)
 
 # Plot 3: scenario comparison over time
-axes[1, 0].axhline(0, color="black", lw=1.2, linestyle="--", label="0 MW")
+# Plot 3: scenario supply comparison over time
 axes[1, 0].plot(jan_hours, p50_s1, lw=2,   color="green",  label="S1: Full grid")
 axes[1, 0].plot(jan_hours, p50_s2, lw=2,   color="red",    label="S2: Full isolation")
 axes[1, 0].plot(jan_hours, p50_s3, lw=1.5, color="orange", label="S3: Isolated + 500 MW wind")
 axes[1, 0].plot(jan_hours, p50_s4, lw=1.5, color="gold",   label="S4: Isolated + 1000 MW wind")
-axes[1, 0].fill_between(jan_hours, p50_s2, 0,
-    where=(p50_s2 < 0), alpha=0.12, color="red")
-axes[1, 0].fill_between(jan_hours, p50_s3, 0,
-    where=(p50_s3 < 0), alpha=0.12, color="orange")
-axes[1, 0].set_title("Energy Balance by Scenario")
-axes[1, 0].set_ylabel("Balance (MW)  [+ surplus, − deficit]")
+
+# Show the gap between S1 and S2 — this is the import dependency
+axes[1, 0].fill_between(jan_hours, p50_s1, p50_s2,
+    alpha=0.15, color="red", label="Import dependency gap (S1-S2)")
+
+axes[1, 0].set_title("Available Energy Supply by Scenario — January 2026")
+axes[1, 0].set_ylabel("Available Supply (MW)")
 axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
 axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
 axes[1, 0].tick_params(axis="x", rotation=30)
-
-# Plot 4: deficit hours bar chart
-labels  = ["S1\nFull grid", "S2\nIsolated",
-           "S3\n+500 MW", "S4\n+1000 MW", "S5\n+2000 MW"]
-d_hours = [(p50_s1 < 0).sum(), (p50_s2 < 0).sum(),
-           (p50_s3 < 0).sum(), (p50_s4 < 0).sum(), (p50_s5 < 0).sum()]
-s_hours = [(p50_s1 < -100).sum(), (p50_s2 < -100).sum(),
-           (p50_s3 < -100).sum(), (p50_s4 < -100).sum(), (p50_s5 < -100).sum()]
-colors  = ["green", "red", "orange", "gold", "limegreen"]
+# Plot 4: mean available supply by scenario
+scenario_names = ["S1\nFull grid", "S2\nIsolated",
+                  "S3\n+500 MW", "S4\n+1000 MW", "S5\n+2000 MW"]
+mean_supply = [p50_s1.mean(), p50_s2.mean(),
+               p50_s3.mean(), p50_s4.mean(), p50_s5.mean()]
+min_supply  = [p10_s1.min(), p10_s2.min(),
+               p10_s3.min(), p10_s4.min(), p10_s5.min()]
+colors = ["green", "red", "orange", "gold", "limegreen"]
 
 x = np.arange(5)
-axes[1, 1].bar(x - 0.2, d_hours, 0.35, color=colors, alpha=0.8,
-               label="Deficit hours (< 0 MW)")
-axes[1, 1].bar(x + 0.2, s_hours, 0.35, color=colors, alpha=0.4,
-               hatch="//", label="Severe deficit (< -100 MW)")
+bars = axes[1, 1].bar(x, mean_supply, 0.5, color=colors, alpha=0.8,
+                      label="Mean available supply (P50)")
+axes[1, 1].scatter(x, min_supply, color="black", zorder=5,
+                   marker="v", s=80, label="Worst hour (P10)")
+
+# Add value labels on top of bars
+for bar, val in zip(bars, mean_supply):
+    axes[1, 1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 20,
+                    f"{val:.0f}", ha="center", va="bottom", fontsize=8)
+
+# Add typical Estonian consumption line for reference
+axes[1, 1].axhline(900, color="black", lw=1.5, linestyle="--",
+                   label="Typical consumption (~900 MW)")
+
 axes[1, 1].set_xticks(x)
-axes[1, 1].set_xticklabels(labels, fontsize=9)
-axes[1, 1].set_ylabel("Hours in January 2026")
-axes[1, 1].set_title("Resilience: Deficit Hours by Scenario\n"
-                      "[S3–S5 are placeholders until wind simulation is ready]")
+axes[1, 1].set_xticklabels(scenario_names, fontsize=9)
+axes[1, 1].set_ylabel("Available Supply (MW)")
+axes[1, 1].set_title("Mean Available Supply by Scenario\n")
 axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(alpha=0.3, axis="y")
 
@@ -536,6 +547,5 @@ plt.savefig("stgnn_resilience.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 print("\n✓ Complete! Saved to stgnn_resilience.png")
-print("\nNOTE: S3-S5 use flat MW placeholders.")
-print("Replace extra_wind_mw with wind_series= when OpenWeather")
-print("simulation is ready.")
+print("\nNOTE: S3-S5 use flat MW wind placeholders.")
+print("Replace extra_wind_mw with wind_series= when simulated wind is ready.")
