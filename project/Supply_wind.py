@@ -1,4 +1,6 @@
 from datetime import datetime
+import os
+import pickle
 import pandas as pd
 import helper_functions_GNN as helper
 from STGNN import STGNN
@@ -15,16 +17,24 @@ BASE = "https://dashboard.elering.ee/api"
 START = "2019-01-01T00:00:00.000Z"
 END = "2026-02-01T00:00:00.000Z"
 
-df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
-df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
-df_system = helper.fetch_all(helper.get_system_production, START, END)
+CACHE_FILE = "data_cache.pkl"
 
-df_weather = helper.get_weather_openmeteo(
-    lat=58.90,
-    lon=24.75,
-    start=START,
-    end=END,
-)
+if os.path.exists(CACHE_FILE):
+    print("[CACHE] Loading cached data (skip API calls)...")
+    with open(CACHE_FILE, "rb") as _f:
+        df_prices, df_flows, df_system, df_weather = pickle.load(_f)
+    print("[CACHE] Done.")
+else:
+    print("[API] Fetching data — first run, will cache to disk...")
+    df_prices = helper.fetch_all(helper.get_nps_prices, START, END)
+    df_flows = helper.fetch_all(helper.get_cross_border_flows, START, END)
+    df_system = helper.fetch_all(helper.get_system_production, START, END)
+    df_weather = helper.get_weather_openmeteo(
+        lat=58.90, lon=24.75, start=START, end=END
+    )
+    with open(CACHE_FILE, "wb") as _f:
+        pickle.dump((df_prices, df_flows, df_system, df_weather), _f)
+    print("[API] Data fetched and cached.")
 
 df_prices_hourly = df_prices.resample("h").mean()
 df_flows_hourly = df_flows.resample("h").mean().fillna(0)
@@ -165,7 +175,9 @@ FLOW_FI_IDX = FEATURE_NAMES.index("flow_fi")
 FLOW_LV_IDX = FEATURE_NAMES.index("flow_lv")
 RENEW_IDX = FEATURE_NAMES.index("production_renewable")
 PROD_IDX = FEATURE_NAMES.index("production")
-WIND_MW_IDX = FEATURE_NAMES.index("wind_mw")  # ENTSOE wind MW feature index
+WIND_MW_IDX = FEATURE_NAMES.index("wind_mw")
+TEMP_IDX = FEATURE_NAMES.index("temperature")
+WIND_IDX = FEATURE_NAMES.index("wind_speed_10m")
 
 print(f"    Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 
@@ -176,7 +188,7 @@ print("\n[2/6] Creating sequences...")
 
 SEQ_LEN = 48  # 2 days of hourly history
 
-y_target_values = system_h["available_energy"].values
+y_target_values = system_h["production"].values
 
 X_list, y_list = [], []
 for t in range(SEQ_LEN, len(node_data) - HORIZON):
@@ -223,7 +235,7 @@ device = torch.device(
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
-model = STGNN(NUM_FEATURES, hidden_dim=64).to(device)
+model = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
 edge_index = edge_index.to(device)
 x_mean = scaler.x_mean.to(device)
 x_std = scaler.x_std.to(device)
@@ -240,7 +252,7 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, patience=5, factor=0.5
 )
 
-BATCH_SIZE = 64
+BATCH_SIZE = 256
 EPOCHS = 200
 
 early_stopping = opt.EarlyStopping(patience=15, min_delta=1e-4, path="best_stgnn.pt")
@@ -327,7 +339,7 @@ coverage = np.mean((actual >= p10) & (actual <= p90))
 print(f"  MAE:              {mae:.1f} MW")
 print(f"  RMSE:             {rmse:.1f} MW")
 print(f"  P10-P90 coverage: {coverage * 100:.1f}%  (target ≥ 80%)")
-print(f"  Actual deficit hours (Jan 2026): {(actual < 0).sum()}")
+print(f"  Actual production range: {actual.min():.0f} – {actual.max():.0f} MW")
 
 
 # --------------------------------------------------
@@ -348,20 +360,10 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     if isolate:
         edges = torch.zeros((2, 0), dtype=torch.long)
 
-        # Save scaled flows before zeroing — needed to adjust supply signal
-        fi_flow_orig = x_mod[:, :, 0, FLOW_FI_IDX].clone()
-        lv_flow_orig = x_mod[:, :, 0, FLOW_LV_IDX].clone()
-
         x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 1, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
         x_mod[:, :, 2, FLOW_LV_IDX] = 0.0
-
-        # available_energy_lag24 was computed as production - flows.
-        # Zeroing the flows means we lose imports (negative flows → adding them
-        # back reduces available_energy, which is the correct direction).
-        x_mod[:, :, 0, SUPPLY_IDX] += fi_flow_orig
-        x_mod[:, :, 0, SUPPLY_IDX] += lv_flow_orig
 
     if wind_series is not None:
         # wind_series is ADDITIONAL production from new farms (not in historical data).
@@ -403,10 +405,10 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
 
     if name:
         print(f"\n  {name}")
-        print(f"    Median balance:      {p50_s.mean():+.0f} MW")
-        print(f"    Hours in deficit:    {deficit_h} / {len(p50_s)}")
-        print(f"    Severe deficit hrs:  {severe_h}  (< -100 MW)")
-        print(f"    Worst hour (P10):    {p10_s.min():+.0f} MW")
+        print(f"    Median production:   {p50_s.mean():+.0f} MW")
+        print(f"    Min production (P10):{p10_s.min():+.0f} MW")
+        print(f"    Hours prod < 0:      {deficit_h} / {len(p50_s)}")
+        print(f"    Hours prod < -100:   {severe_h}")
 
     return p50_s, p10_s, p90_s
 
@@ -480,19 +482,10 @@ axes[0, 1].fill_between(
 )
 axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast")
 axes[0, 1].plot(
-    jan_hours, actual, lw=1.5, color="red", linestyle="--", label="Actual balance"
-)
-axes[0, 1].fill_between(
-    jan_hours,
-    p50,
-    0,
-    where=(p50 < 0),
-    alpha=0.25,
-    color="red",
-    label="Predicted deficit",
+    jan_hours, actual, lw=1.5, color="red", linestyle="--", label="Actual production"
 )
 axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
-axes[0, 1].set_ylabel("Energy balance (MW)")
+axes[0, 1].set_ylabel("Production (MW)")
 axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
 axes[0, 1].legend(fontsize=8)
 axes[0, 1].grid(alpha=0.3)
@@ -514,8 +507,8 @@ axes[1, 0].fill_between(
 axes[1, 0].fill_between(
     jan_hours, p50_s3, 0, where=(p50_s3 < 0), alpha=0.12, color="orange"
 )
-axes[1, 0].set_title("Energy Balance by Scenario")
-axes[1, 0].set_ylabel("Balance (MW)  [+ surplus, − deficit]")
+axes[1, 0].set_title("Production by Scenario")
+axes[1, 0].set_ylabel("Production (MW)")
 axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
 axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
