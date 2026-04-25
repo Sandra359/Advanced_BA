@@ -9,8 +9,8 @@ class PowerScaler:
         
         # X stats: Shape (1, 1, 1, Num_Features) 
         # This treats each feature type globally across all time and nodes
-        self.x_mean = tx.mean(dim=(0, 1, 2), keepdim=True)
-        self.x_std  = tx.std(dim=(0, 1, 2),  keepdim=True) + 1e-7
+        self.x_mean = tx.mean(dim=(0, 1), keepdim=True)
+        self.x_std  = tx.std(dim=(0, 1),  keepdim=True) + 1e-7
         
         # y stats: Scalar values for the target
         self.y_mean = ty.mean()

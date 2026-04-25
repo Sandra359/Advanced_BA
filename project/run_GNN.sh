@@ -1,7 +1,7 @@
 #!/bin/bash
 #BSUB -J supply_stgnn
 #BSUB -q gpuv100
-#BSUB -W 0:10
+#BSUB -W 0:30
 #BSUB -B
 #BSUB -N
 #BSUB -R "rusage[mem=1GB]"
@@ -14,6 +14,5 @@
 
 
 module load cuda/12.1
-module load python3/3.13.11
 
-python3 -u project/Supply.py
+python -u project/Supply.py

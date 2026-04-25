@@ -1,5 +1,9 @@
 import torch
 
+
+lrs = [0.01, 0.005, 0.001, 0.0005, 0.0001]
+hidden_dims = [32, 64, 128]
+
 class EarlyStopping:
     """
     Stops training when validation loss stops improving.
