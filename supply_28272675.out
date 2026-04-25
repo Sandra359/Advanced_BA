@@ -1,0 +1,167 @@
+  Fetched 62136 hours: 2019-01-01 00:00:00+00:00 → 2026-02-01 23:00:00+00:00
+    Hours without enough energy: 0
+
+[2/6] Creating sequences...
+Train: 49,056 ((49056, 48, 4, 15)) | Val: 12,264 | Test (Jan 2026): 721
+  Parameters: 8,611 on cuda
+
+[4/6] Training...
+  Epoch   1: train=0.1271 | val=0.1034 | lr=0.001000
+    ✓ val loss improved → 0.1034  (checkpoint saved)
+    ✓ val loss improved → 0.0988  (checkpoint saved)
+    ✓ val loss improved → 0.0965  (checkpoint saved)
+    ✓ val loss improved → 0.0956  (checkpoint saved)
+  Epoch   5: train=0.0881 | val=0.0936 | lr=0.001000
+    ✓ val loss improved → 0.0936  (checkpoint saved)
+    ✓ val loss improved → 0.0922  (checkpoint saved)
+    No improvement (1/15)
+    No improvement (2/15)
+    No improvement (3/15)
+  Epoch  10: train=0.0866 | val=0.0927 | lr=0.001000
+    No improvement (4/15)
+    No improvement (5/15)
+    No improvement (6/15)
+    No improvement (7/15)
+    ✓ val loss improved → 0.0920  (checkpoint saved)
+  Epoch  15: train=0.0842 | val=0.0937 | lr=0.000500
+    No improvement (1/15)
+    No improvement (2/15)
+    No improvement (3/15)
+    No improvement (4/15)
+    ✓ val loss improved → 0.0918  (checkpoint saved)
+  Epoch  20: train=0.0845 | val=0.0946 | lr=0.000500
+    No improvement (1/15)
+    No improvement (2/15)
+    No improvement (3/15)
+    No improvement (4/15)
+    No improvement (5/15)
+  Epoch  25: train=0.0842 | val=0.0940 | lr=0.000250
+    No improvement (6/15)
+    No improvement (7/15)
+    No improvement (8/15)
+    No improvement (9/15)
+    No improvement (10/15)
+  Epoch  30: train=0.0825 | val=0.0909 | lr=0.000250
+    ✓ val loss improved → 0.0909  (checkpoint saved)
+    No improvement (1/15)
+    No improvement (2/15)
+    No improvement (3/15)
+    No improvement (4/15)
+  Epoch  35: train=0.0833 | val=0.0928 | lr=0.000250
+    No improvement (5/15)
+    No improvement (6/15)
+    No improvement (7/15)
+    ✓ val loss improved → 0.0906  (checkpoint saved)
+    No improvement (1/15)
+  Epoch  40: train=0.0820 | val=0.0911 | lr=0.000125
+    No improvement (2/15)
+    No improvement (3/15)
+    No improvement (4/15)
+    No improvement (5/15)
+    No improvement (6/15)
+  Epoch  45: train=0.0824 | val=0.0955 | lr=0.000063
+    No improvement (7/15)
+    No improvement (8/15)
+    No improvement (9/15)
+    No improvement (10/15)
+    No improvement (11/15)
+  Epoch  50: train=0.0813 | val=0.0931 | lr=0.000031
+    No improvement (12/15)
+    No improvement (13/15)
+    No improvement (14/15)
+    No improvement (15/15)
+
+  Early stopping triggered after epoch 53.
+  Loaded best weights from epoch 38 (val loss: 0.0906)
+  Training complete. Best val loss: 0.0906
+
+[5/6] Evaluating on January 2026...
+  Predictions generated for 721 samples.
+  MAE:              61.9 MW
+  RMSE:             76.5 MW
+  P10-P90 coverage: 82.9%  (target ≥ 80%)
+  Actual deficit hours (Jan 2026): 0
+
+  --- Scenario comparison (January 2026) ---
+
+  S1: Full grid — all connections intact
+    Median balance:      +1241 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +880 MW
+
+  S2: Full isolation — no cross-border connections
+    Median balance:      +1110 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +505 MW
+
+  S3: Isolated + 500 MW wind [PLACEHOLDER — replace with simulated series]
+    Median balance:      +2494 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +1595 MW
+
+  S4: Isolated + 1000 MW wind [PLACEHOLDER]
+    Median balance:      +3608 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +2580 MW
+
+  S5: Isolated + 2000 MW wind [PLACEHOLDER]
+    Median balance:      +4903 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +3958 MW
+
+  --- Break-even: MW of wind needed for full isolation survival ---
+
+  
+    Median balance:      +1817 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +986 MW
+      250 MW wind →   0.0% hours in deficit
+
+  
+    Median balance:      +2494 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +1595 MW
+      500 MW wind →   0.0% hours in deficit
+
+  
+    Median balance:      +3077 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +2123 MW
+      750 MW wind →   0.0% hours in deficit
+
+  
+    Median balance:      +3608 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +2580 MW
+     1000 MW wind →   0.0% hours in deficit
+
+  
+    Median balance:      +4435 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +3402 MW
+     1500 MW wind →   0.0% hours in deficit
+
+  
+    Median balance:      +4903 MW
+    Hours in deficit:    0 / 721
+    Severe deficit hrs:  0  (< -100 MW)
+    Worst hour (P10):    +3958 MW
+     2000 MW wind →   0.0% hours in deficit
+
+[6/6] Visualizing...
+
+✓ Complete! Saved to stgnn_resilience.png
+
+NOTE: S3-S5 use flat MW placeholders.
+Replace extra_wind_mw with wind_series= when OpenWeather
+simulation is ready.
