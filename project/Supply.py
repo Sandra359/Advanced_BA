@@ -455,16 +455,21 @@ def run_scenario(name, isolate=False, wind_series=None, extra_wind_mw=0):
     print(f"    Max available supply (P90):  {p90_s.max():+.0f} MW")
     print(f"    Supply reduction vs S1:      {p50_s1.mean() - p50_s.mean():+.0f} MW"
         if name != "S1: Full grid — all connections intact" else "")
+    
+current_dir = os.path.dirname(os.path.abspath(__file__))
+data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
+wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
+"""
 scenarios = pd.read_csv(
     "../data/wind_production_scenarios.csv", index_col=0, parse_dates=True
 )
-
-baseline = scenarios["wind_mwh_baseline"].values
+"""
+baseline = wind_scenarios["wind_mwh_baseline"].values
 wind_scenA = (
-    scenarios["wind_mwh_scenA"] - scenarios["wind_mwh_baseline"]
+    wind_scenarios["wind_mwh_scenA"] - wind_scenarios["wind_mwh_baseline"]
 ).values  # +323 MW new
 wind_scenB = (
-    scenarios["wind_mwh_scenB"] - scenarios["wind_mwh_baseline"]
+    wind_scenarios["wind_mwh_scenB"] - wind_scenarios["wind_mwh_baseline"]
 ).values  # +887 MW new (323+564)
 
 # --- Run scenarios ---
