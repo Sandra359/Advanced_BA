@@ -350,7 +350,7 @@ print("\n[5/6] Evaluating on January 2026...")
 model.eval()
 with torch.no_grad():
     # Ensure test data is on the correct device
-    #X_test_device = X_test_t.to(device)
+    X_test_device = X_test_t.to(device)
     # Get predictions and move back to CPU for numpy/plotting
     test_preds = model(X_test_device, edge_index).cpu().numpy()
 
