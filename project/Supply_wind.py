@@ -369,7 +369,9 @@ def run_scenario(name, isolate=False, wind_series=None):
     x_mod = X_test_t.clone().cpu()
 
     if isolate:
-        edges = torch.zeros((2, 0), dtype=torch.long)
+        # Self-loops only: each node sees itself but not neighbours.
+        # Semantically "market blind" — EE plants cannot react to FI/LV prices.
+        edges = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long)
 
         x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 1, FLOW_FI_IDX] = 0.0
@@ -547,3 +549,25 @@ plt.savefig("stgnn_resilience_wind.png", dpi=150, bbox_inches="tight")
 plt.show()
 
 print("\n✓ Complete! Saved to stgnn_resilience_wind.png")
+
+# Export all scenario quantiles so the resilience simulator can load them.
+# Stress test uses P10 supply (worst-case production) + P95 demand (ARIMA Monte Carlo).
+results_df = pd.DataFrame(
+    {
+        "timestamp": jan_hours,
+        "supply_s1_p10": p10_s1,
+        "supply_s1_p50": p50_s1,
+        "supply_s1_p90": p90_s1,
+        "supply_s2_p10": p10_s2,
+        "supply_s2_p50": p50_s2,
+        "supply_s2_p90": p90_s2,
+        "supply_s3_p10": p10_s3,
+        "supply_s3_p50": p50_s3,
+        "supply_s3_p90": p90_s3,
+        "supply_s4_p10": p10_s4,
+        "supply_s4_p50": p50_s4,
+        "supply_s4_p90": p90_s4,
+    }
+)
+results_df.to_csv("../data/gnn_supply_scenarios_jan2026.csv", index=False)
+print("✓ Exported scenario quantiles to data/gnn_supply_scenarios_jan2026.csv")
