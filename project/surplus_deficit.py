@@ -42,6 +42,11 @@ def load_and_align(supply_csv: str, demand_mc_csv: str):
     supply    = pd.read_csv(supply_csv,    index_col=0, parse_dates=True)
     demand_mc = pd.read_csv(demand_mc_csv, index_col=0, parse_dates=True)
 
+    # Transpose hvis nødvendigt (rækker skal være tidstrin)
+    if demand_mc.shape[0] < demand_mc.shape[1]:
+        print("  Transposing demand MC (was sims x timesteps)")
+        demand_mc = demand_mc.T
+        demand_mc.index = pd.to_datetime(demand_mc.index)
     # Ensure UTC timezone on both
     if supply.index.tz is None:
         supply.index = supply.index.tz_localize("UTC")
@@ -338,6 +343,6 @@ def run_resilience_analysis(
 
 if __name__ == "__main__":
     results = run_resilience_analysis(
-        demand_mc_csv="../data/demand_mc_jan2026.csv.csv",
+        demand_mc_csv="../mc_simulation_lines_2026.csv",
         supply_csv="../data/gnn_supply_scenarios_jan2026.csv",
     )
