@@ -15,9 +15,15 @@ Usage:
     )
 """
 
+import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+
+_DIR     = os.path.dirname(os.path.abspath(__file__))
+_DATA    = os.path.join(_DIR, "..", "data")
+_FIGURES = os.path.join(_DIR, "..", "figures")
+os.makedirs(_FIGURES, exist_ok=True)
 
 
 # ==================================================
@@ -207,8 +213,8 @@ def plot_resilience(supply: pd.DataFrame,
 
     plt.suptitle("Supply vs Demand — January 2026", fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("resilience_supply_vs_demand.png", dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.savefig(os.path.join(_FIGURES, "resilience_supply_vs_demand.png"), dpi=150, bbox_inches="tight")
+    plt.close()
 
     # ----------------------------------------------------------------
     # FIGURE 2: Deficit risk + surplus over time
@@ -240,8 +246,8 @@ def plot_resilience(supply: pd.DataFrame,
 
     plt.suptitle("Resilience Analysis — January 2026", fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("resilience_deficit_risk.png", dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.savefig(os.path.join(_FIGURES, "resilience_deficit_risk.png"), dpi=150, bbox_inches="tight")
+    plt.close()
 
     # ----------------------------------------------------------------
     # FIGURE 3: Summary bar charts
@@ -276,8 +282,8 @@ def plot_resilience(supply: pd.DataFrame,
 
     plt.suptitle("Scenario Comparison Summary", fontsize=14, fontweight="bold")
     plt.tight_layout()
-    plt.savefig("resilience_summary.png", dpi=150, bbox_inches="tight")
-    plt.show()
+    plt.savefig(os.path.join(_FIGURES, "resilience_summary.png"), dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 # ==================================================
@@ -285,23 +291,26 @@ def plot_resilience(supply: pd.DataFrame,
 # ==================================================
 
 def run_resilience_analysis(
-    demand_mc_csv: str = "../data/sarimax_demand_mc_jan2026.csv",
-    supply_csv:    str = "../data/gnn_supply_scenarios_jan2026.csv",
+    demand_mc_csv=None,
+    supply_csv=None,
 ):
     """
     Main entry point — load both CSVs, compute surplus/deficit, plot results.
 
     Parameters
     ----------
-    demand_mc_csv : path to sarimax_demand_mc_jan2026.csv
-                    (saved from SARIMAX notebook: demand_mc_2026.to_csv(...))
-    supply_csv    : path to gnn_supply_scenarios_jan2026.csv
-                    (saved from GNN notebook)
+    demand_mc_csv : path to demand_mc_jan2026.csv (default: data/ next to repo root)
+    supply_csv    : path to gnn_supply_scenarios_jan2026.csv (default: same)
 
     Returns
     -------
     results : dict with surplus and deficit metrics per scenario
     """
+    if demand_mc_csv is None:
+        demand_mc_csv = os.path.join(_DATA, "demand_mc_jan2026.csv")
+    if supply_csv is None:
+        supply_csv = os.path.join(_DATA, "gnn_supply_scenarios_jan2026.csv")
+
     print("=" * 60)
     print("RESILIENCE ANALYSIS: Supply vs Demand")
     print("=" * 60)
@@ -331,8 +340,9 @@ def run_resilience_analysis(
 
     print("\n  Summary table:")
     print(summary.round(1).to_string())
-    summary.to_csv("resilience_summary_table.csv")
-    print("\n  Saved resilience_summary_table.csv")
+    _out = os.path.join(_DATA, "resilience_summary_table.csv")
+    summary.to_csv(_out)
+    print(f"\n  Saved {_out}")
 
     return results
 
@@ -342,7 +352,4 @@ def run_resilience_analysis(
 # ==================================================
 
 if __name__ == "__main__":
-    results = run_resilience_analysis(
-        demand_mc_csv="../mc_simulation_lines_2026.csv",
-        supply_csv="../data/gnn_supply_scenarios_jan2026.csv",
-    )
+    results = run_resilience_analysis()
