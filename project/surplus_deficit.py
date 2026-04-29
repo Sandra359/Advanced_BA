@@ -2,54 +2,61 @@
 Resilience Analysis: Merge GNN Supply Scenarios with SARIMAX Monte Carlo Demand
 ================================================================================
 Supply: GNN quantile forecasts (P10/P50/P90) for 4 scenarios (S1-S4)
-Demand: SARIMAX Monte Carlo ensemble (demand_mc_2026 DataFrame)
+Demand: SARIMAX Monte Carlo ensemble saved as CSV
 
 Surplus = Supply - Demand
 Deficit = Supply < Demand  (i.e. surplus < 0)
+
+Usage:
+    from resilience_analysis import run_resilience_analysis
+    results = run_resilience_analysis(
+        demand_mc_csv="../data/sarimax_demand_mc_jan2026.csv",
+        supply_csv="../data/gnn_supply_scenarios_jan2026.csv"
+    )
 """
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 
 # ==================================================
-# LOAD DATA
+# LOAD & ALIGN
 # ==================================================
 
 def load_and_align(supply_csv: str, demand_mc_csv: str):
     """
-    Load GNN supply scenarios and align timestamps with demand Monte Carlo.
+    Load GNN supply scenarios and SARIMAX demand Monte Carlo from CSV,
+    then align on common timestamps.
 
     Parameters
     ----------
-    supply_csv : path to gnn_supply_scenarios_jan2026.csv
-    demand_mc  : DataFrame (index=timestamps, columns=sim_0..sim_N)
-                 — your demand_mc_2026 from SARIMAX
+    supply_csv    : path to gnn_supply_scenarios_jan2026.csv
+    demand_mc_csv : path to sarimax_demand_mc_jan2026.csv
 
     Returns
     -------
-    supply : DataFrame aligned to demand index
-    demand : DataFrame (same index as supply)
+    supply    : DataFrame (n_hours x scenario_columns)
+    demand_mc : DataFrame (n_hours x n_sims)
     """
-    supply = pd.read_csv(supply_csv, index_col=0, parse_dates=True)
-    
-    # Ensure UTC alignment
+    supply    = pd.read_csv(supply_csv,    index_col=0, parse_dates=True)
+    demand_mc = pd.read_csv(demand_mc_csv, index_col=0, parse_dates=True)
+
+    # Ensure UTC timezone on both
     if supply.index.tz is None:
         supply.index = supply.index.tz_localize("UTC")
     if demand_mc.index.tz is None:
         demand_mc.index = demand_mc.index.tz_localize("UTC")
 
-    # Align on common timestamps (January 2026)
+    # Align on common timestamps
     common_idx = supply.index.intersection(demand_mc.index)
-    supply = supply.loc[common_idx]
-    demand = demand_mc.loc[common_idx]
+    supply    = supply.loc[common_idx]
+    demand_mc = demand_mc.loc[common_idx]
 
-    print(f"  Aligned timestamps: {len(common_idx)} hours")
-    print(f"  Supply columns: {list(supply.columns)}")
-    print(f"  Demand simulations: {demand.shape[1]}")
-    return supply, demand
+    print(f"  Aligned timestamps:  {len(common_idx)} hours")
+    print(f"  Supply columns:      {list(supply.columns)}")
+    print(f"  Demand simulations:  {demand_mc.shape[1]}")
+    return supply, demand_mc
 
 
 # ==================================================
@@ -61,8 +68,9 @@ def compute_surplus_and_deficit(supply: pd.DataFrame,
                                 scenarios: list = None):
     """
     For each supply scenario and each demand simulation, compute:
-      - surplus[t] = supply_p50[t] - demand_sim[t]
-      - deficit_risk[t] = fraction of simulations where supply < demand
+      - surplus_mat[t, sim] = supply_p50[t] - demand_sim[t]
+      - deficit_risk[t]     = fraction of sims where supply < demand
+      - expected_shortfall  = mean shortfall in MW across all sims
 
     Parameters
     ----------
@@ -72,15 +80,15 @@ def compute_surplus_and_deficit(supply: pd.DataFrame,
 
     Returns
     -------
-    results : dict keyed by scenario name, each containing:
+    results : dict keyed by scenario, each containing:
               surplus_p50, surplus_p10, surplus_p90,
-              deficit_risk (fraction of sims with deficit per hour),
-              expected_deficit_mw (mean shortfall when deficit occurs)
+              deficit_risk, expected_shortfall, surplus_mat
     """
     if scenarios is None:
         scenarios = ["s1", "s2", "s3", "s4"]
 
-    demand_arr = demand.values  # (n_hours, n_sims)
+    demand_arr  = demand.values            # (n_hours, n_sims)
+    demand_mean = demand_arr.mean(axis=1)  # (n_hours,)
     results = {}
 
     for sc in scenarios:
@@ -88,40 +96,39 @@ def compute_surplus_and_deficit(supply: pd.DataFrame,
         p50 = supply[f"supply_{sc}_p50"].values
         p90 = supply[f"supply_{sc}_p90"].values
 
-        # Surplus = supply - demand, for each simulation
-        # p50 vs all demand sims:  shape (n_hours, n_sims)
+        # Surplus matrix: supply_p50 vs all demand sims → (n_hours, n_sims)
         surplus_mat = p50[:, np.newaxis] - demand_arr
 
-        # Fraction of simulations with deficit (supply < demand)
+        # Fraction of sims with deficit (supply < demand)
         deficit_risk = np.mean(surplus_mat < 0, axis=1)  # (n_hours,)
 
-        # Expected shortfall when deficit occurs (MW)
-        shortfall = np.where(surplus_mat < 0, -surplus_mat, 0.0)
-        expected_shortfall = shortfall.mean(axis=1)  # mean over all sims
+        # Expected shortfall: mean MW deficit across all sims
+        shortfall          = np.where(surplus_mat < 0, -surplus_mat, 0.0)
+        expected_shortfall = shortfall.mean(axis=1)      # (n_hours,)
 
-        # Surplus quantiles using supply quantiles vs demand mean
-        demand_mean = demand_arr.mean(axis=1)
+        # Surplus using supply quantiles vs mean demand
         surplus_p50 = p50 - demand_mean
-        surplus_p10 = p10 - demand_mean   # worst supply vs mean demand
-        surplus_p90 = p90 - demand_mean   # best supply vs mean demand
+        surplus_p10 = p10 - demand_mean   # worst-case supply
+        surplus_p90 = p90 - demand_mean   # best-case supply
 
         results[sc] = {
-            "surplus_p50":         surplus_p50,
-            "surplus_p10":         surplus_p10,
-            "surplus_p90":         surplus_p90,
-            "deficit_risk":        deficit_risk,
-            "expected_shortfall":  expected_shortfall,
-            "surplus_mat":         surplus_mat,
+            "surplus_p50":        surplus_p50,
+            "surplus_p10":        surplus_p10,
+            "surplus_p90":        surplus_p90,
+            "deficit_risk":       deficit_risk,
+            "expected_shortfall": expected_shortfall,
+            "surplus_mat":        surplus_mat,
         }
 
-        # Summary statistics
+        # Print summary
         pct_deficit_hours = 100 * np.mean(deficit_risk > 0.5)
-        mean_risk = 100 * deficit_risk.mean()
+        mean_risk         = 100 * deficit_risk.mean()
         print(f"\n  Scenario {sc.upper()}:")
         print(f"    Mean deficit risk per hour:     {mean_risk:.1f}%")
         print(f"    Hours with >50% deficit risk:   {pct_deficit_hours:.1f}%")
         print(f"    Max deficit risk (single hour): {deficit_risk.max()*100:.1f}%")
-        print(f"    Mean surplus (P50-demand_mean): {surplus_p50.mean():.0f} MW")
+        print(f"    Mean surplus (P50 - demand):    {surplus_p50.mean():.0f} MW")
+        print(f"    Min surplus:                    {surplus_p50.min():.0f} MW")
 
     return results
 
@@ -135,11 +142,10 @@ def plot_resilience(supply: pd.DataFrame,
                     results: dict,
                     scenarios: list = None):
     """
-    4-panel plot per scenario:
-      1. Supply P10/P50/P90 vs demand distribution
-      2. Surplus over time with uncertainty band
-      3. Deficit risk per hour
-      4. Hourly expected shortfall
+    Three figures:
+      1. Supply P10/P50/P90 vs demand distribution — one panel per scenario
+      2. Deficit risk + surplus over time — all scenarios overlaid
+      3. Summary bar charts — mean deficit risk and mean surplus
     """
     if scenarios is None:
         scenarios = ["s1", "s2", "s3", "s4"]
@@ -157,13 +163,13 @@ def plot_resilience(supply: pd.DataFrame,
         "s4": "gold",
     }
 
-    idx = supply.index
+    idx         = supply.index
     demand_mean = demand.mean(axis=1).values
     demand_q05  = demand.quantile(0.05, axis=1).values
     demand_q95  = demand.quantile(0.95, axis=1).values
 
     # ----------------------------------------------------------------
-    # PLOT 1: Supply vs Demand per scenario (time series)
+    # FIGURE 1: Supply vs Demand per scenario
     # ----------------------------------------------------------------
     fig, axes = plt.subplots(len(scenarios), 1,
                              figsize=(16, 4 * len(scenarios)),
@@ -173,23 +179,22 @@ def plot_resilience(supply: pd.DataFrame,
 
     for ax, sc in zip(axes, scenarios):
         color = scenario_colors[sc]
-        r = results[sc]
 
-        # Demand distribution
+        # Demand band
         ax.fill_between(idx, demand_q05, demand_q95,
                         alpha=0.15, color="gray", label="Demand P5–P95")
         ax.plot(idx, demand_mean, color="black", lw=1.5,
                 linestyle="--", label="Demand mean")
 
-        # Supply
+        # Supply band
         p10 = supply[f"supply_{sc}_p10"].values
         p50 = supply[f"supply_{sc}_p50"].values
         p90 = supply[f"supply_{sc}_p90"].values
         ax.fill_between(idx, p10, p90, alpha=0.2, color=color,
-                        label=f"Supply P10–P90 ({sc.upper()})")
-        ax.plot(idx, p50, color=color, lw=2, label=f"Supply P50 ({sc.upper()})")
+                        label="Supply P10–P90")
+        ax.plot(idx, p50, color=color, lw=2, label="Supply P50")
 
-        ax.set_title(scenario_labels[sc])
+        ax.set_title(scenario_labels[sc], fontsize=11)
         ax.set_ylabel("Power (MW)")
         ax.legend(fontsize=8, loc="upper right")
         ax.grid(alpha=0.3)
@@ -201,12 +206,12 @@ def plot_resilience(supply: pd.DataFrame,
     plt.show()
 
     # ----------------------------------------------------------------
-    # PLOT 2: Deficit risk over time — all scenarios in one plot
+    # FIGURE 2: Deficit risk + surplus over time
     # ----------------------------------------------------------------
     fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
 
     for sc in scenarios:
-        r = results[sc]
+        r     = results[sc]
         color = scenario_colors[sc]
         axes[0].plot(idx, r["deficit_risk"] * 100,
                      color=color, lw=1.5, label=scenario_labels[sc])
@@ -214,14 +219,14 @@ def plot_resilience(supply: pd.DataFrame,
                      color=color, lw=1.5, label=scenario_labels[sc])
 
     axes[0].axhline(50, color="black", lw=1, linestyle=":",
-                    label="50% deficit risk threshold")
+                    label="50% deficit risk")
     axes[0].set_ylabel("Deficit risk (%)")
-    axes[0].set_title("Hourly deficit risk (% of demand sims where supply < demand)")
+    axes[0].set_title("Hourly deficit risk  (% of demand sims where supply < demand)")
     axes[0].legend(fontsize=8)
     axes[0].grid(alpha=0.3)
     axes[0].set_ylim(0, 105)
 
-    axes[1].axhline(0, color="black", lw=1.5, linestyle="--")
+    axes[1].axhline(0, color="black", lw=1.5, linestyle="--", label="Break-even")
     axes[1].set_ylabel("Surplus P50 (MW)")
     axes[1].set_title("Surplus = Supply P50 − Mean Demand  (negative = deficit)")
     axes[1].legend(fontsize=8)
@@ -234,15 +239,15 @@ def plot_resilience(supply: pd.DataFrame,
     plt.show()
 
     # ----------------------------------------------------------------
-    # PLOT 3: Summary bar chart — mean deficit risk per scenario
+    # FIGURE 3: Summary bar charts
     # ----------------------------------------------------------------
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    sc_names  = [scenario_labels[sc] for sc in scenarios]
-    sc_colors = [scenario_colors[sc]  for sc in scenarios]
+    sc_colors    = [scenario_colors[sc]             for sc in scenarios]
+    mean_risks   = [results[sc]["deficit_risk"].mean() * 100 for sc in scenarios]
+    mean_surplus = [results[sc]["surplus_p50"].mean()        for sc in scenarios]
 
-    # Mean deficit risk
-    mean_risks = [results[sc]["deficit_risk"].mean() * 100 for sc in scenarios]
+    # Bar 1: mean deficit risk
     axes[0].bar(range(len(scenarios)), mean_risks, color=sc_colors, alpha=0.8)
     axes[0].set_xticks(range(len(scenarios)))
     axes[0].set_xticklabels([sc.upper() for sc in scenarios])
@@ -252,8 +257,7 @@ def plot_resilience(supply: pd.DataFrame,
         axes[0].text(i, v + 0.3, f"{v:.1f}%", ha="center", fontsize=9)
     axes[0].grid(alpha=0.3, axis="y")
 
-    # Mean surplus
-    mean_surplus = [results[sc]["surplus_p50"].mean() for sc in scenarios]
+    # Bar 2: mean surplus
     axes[1].bar(range(len(scenarios)), mean_surplus, color=sc_colors, alpha=0.8)
     axes[1].axhline(0, color="black", lw=1.5)
     axes[1].set_xticks(range(len(scenarios)))
@@ -261,8 +265,8 @@ def plot_resilience(supply: pd.DataFrame,
     axes[1].set_ylabel("Mean surplus (MW)")
     axes[1].set_title("Mean Surplus = Supply P50 − Mean Demand")
     for i, v in enumerate(mean_surplus):
-        axes[1].text(i, v + (5 if v >= 0 else -15),
-                     f"{v:.0f} MW", ha="center", fontsize=9)
+        offset = 5 if v >= 0 else -20
+        axes[1].text(i, v + offset, f"{v:.0f} MW", ha="center", fontsize=9)
     axes[1].grid(alpha=0.3, axis="y")
 
     plt.suptitle("Scenario Comparison Summary", fontsize=14, fontweight="bold")
@@ -272,22 +276,22 @@ def plot_resilience(supply: pd.DataFrame,
 
 
 # ==================================================
-# MAIN — integrate with your existing notebooks
+# MAIN ENTRY POINT
 # ==================================================
 
-def run_resilience_analysis(demand_mc_2026: pd.DataFrame,
-                             supply_csv: str = "../data/gnn_supply_scenarios_jan2026.csv"):
+def run_resilience_analysis(
+    demand_mc_csv: str = "../data/sarimax_demand_mc_jan2026.csv",
+    supply_csv:    str = "../data/gnn_supply_scenarios_jan2026.csv",
+):
     """
-    Main entry point. Call this from your notebook after running both
-    the SARIMAX demand simulation and the GNN supply forecasts.
+    Main entry point — load both CSVs, compute surplus/deficit, plot results.
 
     Parameters
     ----------
-    demand_mc_2026 : pd.DataFrame
-        Output of simulate_demand_ensemble_with_random_betas()
-        Index = timestamps, columns = simulation runs
-    supply_csv : str
-        Path to CSV exported by GNN notebook
+    demand_mc_csv : path to sarimax_demand_mc_jan2026.csv
+                    (saved from SARIMAX notebook: demand_mc_2026.to_csv(...))
+    supply_csv    : path to gnn_supply_scenarios_jan2026.csv
+                    (saved from GNN notebook)
 
     Returns
     -------
@@ -298,11 +302,11 @@ def run_resilience_analysis(demand_mc_2026: pd.DataFrame,
     print("=" * 60)
 
     print("\n[1/3] Loading and aligning data...")
-    supply, demand = load_and_align(supply_csv, demand_mc_2026)
+    supply, demand = load_and_align(supply_csv, demand_mc_csv)
 
     print("\n[2/3] Computing surplus and deficit risk...")
     scenarios = ["s1", "s2", "s3", "s4"]
-    results = compute_surplus_and_deficit(supply, demand, scenarios)
+    results   = compute_surplus_and_deficit(supply, demand, scenarios)
 
     print("\n[3/3] Plotting...")
     plot_resilience(supply, demand, results, scenarios)
@@ -311,7 +315,7 @@ def run_resilience_analysis(demand_mc_2026: pd.DataFrame,
     summary = pd.DataFrame({
         sc: {
             "mean_deficit_risk_%":   results[sc]["deficit_risk"].mean() * 100,
-            "max_deficit_risk_%":    results[sc]["deficit_risk"].max() * 100,
+            "max_deficit_risk_%":    results[sc]["deficit_risk"].max()  * 100,
             "pct_hours_deficit>50%": np.mean(results[sc]["deficit_risk"] > 0.5) * 100,
             "mean_surplus_MW":       results[sc]["surplus_p50"].mean(),
             "min_surplus_MW":        results[sc]["surplus_p50"].min(),
@@ -319,28 +323,21 @@ def run_resilience_analysis(demand_mc_2026: pd.DataFrame,
         }
         for sc in scenarios
     }).T
+
     print("\n  Summary table:")
     print(summary.round(1).to_string())
     summary.to_csv("resilience_summary_table.csv")
-    print("\n  Saved to resilience_summary_table.csv")
+    print("\n  Saved resilience_summary_table.csv")
 
     return results
 
 
 # ==================================================
-# NOTEBOOK USAGE EXAMPLE
+# STANDALONE RUN
 # ==================================================
-"""
-# In your notebook, after running both GNN and SARIMAX:
 
-from resilience_analysis import run_resilience_analysis
-
-results = run_resilience_analysis(
-    demand_mc_2026=demand_mc_2026,          # from SARIMAX notebook
-    supply_csv="../data/gnn_supply_scenarios_jan2026.csv"  # from GNN notebook
-)
-
-# Access specific results:
-deficit_risk_s2 = results["s2"]["deficit_risk"]   # hourly deficit risk for isolated scenario
-surplus_s1      = results["s1"]["surplus_p50"]    # hourly surplus for full grid
-"""
+if __name__ == "__main__":
+    results = run_resilience_analysis(
+        demand_mc_csv="../data/sarimax_demand_mc_jan2026.csv",
+        supply_csv="../data/gnn_supply_scenarios_jan2026.csv",
+    )
