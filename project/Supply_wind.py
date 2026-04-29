@@ -480,10 +480,10 @@ wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
 # Dec 30-31 sequence positions (temporal misalignment).
 _pad = np.zeros(SEQ_LEN) #48 nuller som prepends for at sikre korrekt tidsjustering af vindscenarierne (ingen injection i december)
 wind_scenA = np.concatenate(
-    [_pad, (scenarios["wind_mwh_scenA"] - scenarios["wind_mwh_baseline"]).values]
+    [_pad, (wind_scenarios["wind_mwh_scenA"] - wind_scenarios["wind_mwh_baseline"]).values]
 )
 wind_scenB = np.concatenate(
-    [_pad, (scenarios["wind_mwh_scenB"] - scenarios["wind_mwh_baseline"]).values]
+    [_pad, (wind_scenarios["wind_mwh_scenB"] - wind_scenarios["wind_mwh_baseline"]).values]
 )
 
 
