@@ -1,5 +1,6 @@
 from datetime import datetime
 import pandas as pd
+from sympy import isolate
 import helper_functions_GNN as helper
 from STGNN import STGNN
 import numpy as np
@@ -109,7 +110,7 @@ print("[DIAGNOSTIC] Mean flow EE→LV (should be negative if EE imports from LV)
 # ─────────────────────────────────────────────────────────────────────────────
 
 entsoe = pd.read_csv(
-    "../data/entsoe_production_hourly.csv", index_col=0, parse_dates=True
+    "/Users/sandrarune/Library/CloudStorage/OneDrive-DanmarksTekniskeUniversitet/8. sem/Advanced BA/Advanced_BA/data/entsoe_production_hourly.csv", index_col=0, parse_dates=True
 )
 wind_mw = entsoe["wind_onshore"].reindex(idx, method="ffill").fillna(0)
 print(f"    wind_mw NaN count after reindex: {wind_mw.isna().sum()}")
@@ -123,7 +124,7 @@ ee_feats = pd.DataFrame({
     "production_lag24": system_h["production"].shift(24),
     "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
     "available_energy":     system_h["available_energy"],
-   # "production_renewable": system_h["production_renewable"], # maybe this? 
+    "production_renewable": system_h["production_renewable"], # der kommeer ikke data leakage ved at bruge denne
     "wind_mw":              wind_mw,
     "flow_fi":              flows_h[("ee", "fi")],
     "flow_lv":              flows_h[("ee", "lv")],
@@ -165,16 +166,20 @@ node_data = np.stack([
 NUM_NODES     = 4
 NUM_FEATURES  = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
-PROD_LAG1_IDX = FEATURE_NAMES.index("production_lag1")
-PROD_LAG24_IDX = FEATURE_NAMES.index("production_lag24")
-SUPPLY_IDX  = FEATURE_NAMES.index("available_energy_lag24")
-FLOW_FI_IDX = FEATURE_NAMES.index("flow_fi")
-FLOW_LV_IDX = FEATURE_NAMES.index("flow_lv")
-RENEW_IDX   = FEATURE_NAMES.index("production_renewable")
-TEMP_IDX    = FEATURE_NAMES.index("temperature")
-WIND_IDX    = FEATURE_NAMES.index("wind_speed_10m")
-WIND_MW_IDX = FEATURE_NAMES.index("wind_mw")
 
+# Features der bruges i scenariosimulering:
+PROD_LAG1_IDX  = FEATURE_NAMES.index("production_lag1")
+PROD_LAG24_IDX = FEATURE_NAMES.index("production_lag24")
+RENEW_IDX      = FEATURE_NAMES.index("production_renewable")  # ← nu virker det
+WIND_MW_IDX    = FEATURE_NAMES.index("wind_mw")
+FLOW_FI_IDX    = FEATURE_NAMES.index("flow_fi")
+FLOW_LV_IDX    = FEATURE_NAMES.index("flow_lv")
+TEMP_IDX       = FEATURE_NAMES.index("temperature")
+WIND_IDX       = FEATURE_NAMES.index("wind_speed_10m")
+
+# available_energy er stadig en feature (lagged version) — ikke target
+AVAIL_LAG_IDX  = FEATURE_NAMES.index("available_energy_lag24")
+AVAIL_IDX      = FEATURE_NAMES.index("available_energy")
 print(f"    Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 
 
@@ -255,8 +260,10 @@ scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, fa
 BATCH_SIZE = 64
 EPOCHS     = 200   # upper bound — early stopping will terminate well before this
 
-early_stopping = opt.EarlyStopping(patience=15, min_delta=1e-4, path="best_stgnn.pt")
-
+early_stopping = opt.EarlyStopping(
+patience=15,  # vent 15 epochs uden forbedring før stop
+min_delta=1e-4, # forbedring skal være mindst 0.0001 for at tælle
+path="best_stgnn.pt")  # gem bedste model weights her på disk
 # Move edge_index to device ONCE before the loop
 edge_index = edge_index.to(device)
 
@@ -364,11 +371,20 @@ def run_scenario(name, isolate=False, wind_series=None):
         # Remove graph edges — no cross-border information exchange
         edges = torch.zeros((2, 0), dtype=torch.long)
 
-        # Zero cross-border flows (isolation scenario)
+        
+        fi_flow_orig = x_mod[:, :, 0, FLOW_FI_IDX].clone()
+        lv_flow_orig = x_mod[:, :, 0, FLOW_LV_IDX].clone()
+        
         x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 1, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
         x_mod[:, :, 2, FLOW_LV_IDX] = 0.0
+        
+        # Opdater available_energy konsistent
+        x_mod[:, :, 0, AVAIL_IDX]     += fi_flow_orig
+        x_mod[:, :, 0, AVAIL_IDX]     += lv_flow_orig
+        x_mod[:, :, 0, AVAIL_LAG_IDX] += fi_flow_orig
+        x_mod[:, :, 0, AVAIL_LAG_IDX] += lv_flow_orig
 
     # Wind production injection
     if wind_series is not None:
@@ -401,12 +417,23 @@ data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.c
 wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
 
 baseline = wind_scenarios["wind_mwh_baseline"].values
-wind_scenA = (
+
+wind_scenA_raw = (
     wind_scenarios["wind_mwh_scenA"] - wind_scenarios["wind_mwh_baseline"]
-).values  # +323 MW new
-wind_scenB = (
+).values
+
+wind_scenB_raw = (
     wind_scenarios["wind_mwh_scenB"] - wind_scenarios["wind_mwh_baseline"]
-).values  # +887 MW new
+).values
+
+# Pad med SEQ_LEN ekstra værdier så alle test samples får vind
+SEQ_LEN = 48
+pad_A = np.full(SEQ_LEN, wind_scenA_raw[-1])  # gentag sidste værdi
+pad_B = np.full(SEQ_LEN, wind_scenB_raw[-1])
+
+wind_scenA = np.concatenate([wind_scenA_raw, pad_A])
+wind_scenB = np.concatenate([wind_scenB_raw, pad_B])
+
 
 # --- Run scenarios ---
 print("\n  --- Scenario comparison (January 2026) ---")
