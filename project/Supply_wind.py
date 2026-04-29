@@ -143,7 +143,7 @@ ee_feats = pd.DataFrame(
         "production_lag24": system_h["production"].shift(24),
         "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
         # Renewable komponenter — no leakage
-        "production_renewable": system_h["production_renewable"],
+        "production_renewable": system_h["production_renewable"].shift(HORIZON),
         "wind_mw": wind_mw,
         # Market context
         "flow_fi": flows_h[("ee", "fi")],
@@ -221,7 +221,7 @@ print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 # ==================================================
 print("\n[2/6] Creating sequences...")
 
-SEQ_LEN = 48  # 2 days of hourly history
+SEQ_LEN = 168  # 1 week -- 1
 
 y_target_values = system_h["production"].values  # production as target
 
@@ -281,7 +281,7 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 # ==================================================
 print("\n[4/6] Training...")
 
-optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=1e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=5e-3)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
     optimizer, patience=5, factor=0.5
 )
@@ -501,13 +501,13 @@ p50_s2, p10_s2, p90_s2 = run_scenario(
     "S2: Full isolation — no cross-border connections", isolate=True
 )
 
-p10_s3, p50_s3, p90_s3 = run_scenario(
+p50_s3, p10_s3, p90_s3 = run_scenario(
     "S3: Isolated + Scenario A (established wind plans)",
     isolate=True,
     wind_series=wind_scenA,
 )
 
-p10_s4, p50_s4, p90_s4 = run_scenario(
+p50_s4, p10_s4, p90_s4 = run_scenario(
     "S4: Isolated + Scenario B (pipeline wind farms)",
     isolate=True,
     wind_series=wind_scenB,

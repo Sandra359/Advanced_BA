@@ -23,9 +23,9 @@ class STGNN(nn.Module):
         self.hidden_dim = hidden_dim
 
         self.gat1 = gnn.GATv2Conv(in_dim,     hidden_dim, heads=4,
-                                   concat=False, dropout=0.3)
+                                   concat=False, dropout=0.4)
         self.gat2 = gnn.GATv2Conv(hidden_dim, hidden_dim, heads=4,
-                                   concat=False, dropout=0.3)
+                                   concat=False, dropout=0.4)
 
         # Residual projection: maps input dim → hidden dim for skip connection
         self.residual_proj = nn.Linear(in_dim, hidden_dim)
