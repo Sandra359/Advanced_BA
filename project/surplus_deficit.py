@@ -18,7 +18,7 @@ import matplotlib.gridspec as gridspec
 # LOAD DATA
 # ==================================================
 
-def load_and_align(supply_csv: str, demand_mc: pd.DataFrame):
+def load_and_align(supply_csv: str, demand_mc_csv: str):
     """
     Load GNN supply scenarios and align timestamps with demand Monte Carlo.
 
@@ -34,7 +34,7 @@ def load_and_align(supply_csv: str, demand_mc: pd.DataFrame):
     demand : DataFrame (same index as supply)
     """
     supply = pd.read_csv(supply_csv, index_col=0, parse_dates=True)
-
+    
     # Ensure UTC alignment
     if supply.index.tz is None:
         supply.index = supply.index.tz_localize("UTC")
