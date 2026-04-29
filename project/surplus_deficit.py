@@ -338,6 +338,6 @@ def run_resilience_analysis(
 
 if __name__ == "__main__":
     results = run_resilience_analysis(
-        demand_mc_csv="../data/sarimax_demand_mc_jan2026.csv",
+        demand_mc_csv="../data/demand_mc_jan2026.csv.csv",
         supply_csv="../data/gnn_supply_scenarios_jan2026.csv",
     )
