@@ -560,9 +560,9 @@ axes[0, 1].tick_params(axis="x", rotation=30)
 axes[1, 0].plot(jan_hours, p50_s1, lw=2, color="green", label="S1: Full grid")
 axes[1, 0].plot(jan_hours, p50_s2, lw=2, color="red", label="S2: Isolated")
 axes[1, 0].plot(
-    jan_hours, p50_s3, lw=1.5, color="orange", label="S3: Isolated + 323 MW"
+    jan_hours, p50_s3, lw=1.5, color="orange", label="S3: Isolated + Scenario A (established wind plans)"
 )
-axes[1, 0].plot(jan_hours, p50_s4, lw=1.5, color="gold", label="S4: Isolated + 887 MW")
+axes[1, 0].plot(jan_hours, p50_s4, lw=1.5, color="gold", label="S4: Isolated + Scenario B (pipeline wind farms)")
 
 # Fill between S1 and S2 — cost of isolation
 axes[1, 0].fill_between(
@@ -583,7 +583,7 @@ axes[1, 0].tick_params(axis="x", rotation=30)
 
 # Plot 4: mean production per scenario with P10-P90 error bars (Supply_wind approach)
 # + consumption reference line (Supply_prod approach)
-s_labels = ["S1\nFull grid", "S2\nIsolated", "S3\n+323 MW", "S4\n+887 MW"]
+s_labels = ["S1\nFull grid", "S2\nIsolated", "S3\n Scenario A", "S4\nScenario B"]
 s_colors = ["green", "red", "orange", "gold"]
 s_p50 = [p50_s1.mean(), p50_s2.mean(), p50_s3.mean(), p50_s4.mean()]
 # clip to 0 — quantile crossing (p10 > p50) can produce negative deltas with a poorly
