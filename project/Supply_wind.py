@@ -9,12 +9,14 @@ import matplotlib.pyplot as plt
 import power_scaler as ps
 import GNN_optimizer as opt
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
 BASE = "https://dashboard.elering.ee/api"
 START = "2019-01-01T00:00:00.000Z"
 END = "2026-02-01T00:00:00.000Z"
 
 # we use cache for the API calls, so we don't have to wait for them every time we run the notebook. The cache is stored in a pickle file called "data_cache.pkl". If the file exists, we load the data from it. If it doesn't exist, we fetch the data from the API and save it to the cache file for future use. This way, we only pay the API call cost once, and subsequent runs are much faster. You can delete the cache file if you want to refresh the data from the API.
-CACHE_FILE = "data_cache.pkl"
+CACHE_FILE = os.path.join(current_dir, "data_cache.pkl")
 
 if os.path.exists(CACHE_FILE):
     print("[CACHE] Loading cached data (skip API calls)...")
@@ -100,7 +102,7 @@ print("[DIAGNOSTIC] Mean flow EE→LV:", flows_h[("ee", "lv")].mean().round(1))
 
 # Change here!!
 entsoe = pd.read_csv(
-    "../data/entsoe_production_hourly.csv", index_col=0, parse_dates=True
+    os.path.join(current_dir, "..", "data", "entsoe_production_hourly.csv"), index_col=0, parse_dates=True
 )
 wind_mw = entsoe["wind_onshore"].reindex(idx, method="ffill").fillna(0)
 print(f"    wind_mw NaN count after reindex: {wind_mw.isna().sum()}")
@@ -108,8 +110,8 @@ print(f"    wind_mw NaN count after reindex: {wind_mw.isna().sum()}")
 # ENTSOE data ends at 2025. For January 2026 (test period), load actual metered
 # wind from the 2026 ENTSOE file. Only January is used — later months are unreliable.
 _raw_2026 = pd.read_csv(
-    "../data/historical_production_data/"
-    "2026_AGGREGATED_GENERATION_PER_TYPE_GENERATION_202512312300-202612312300.csv"
+    os.path.join(current_dir, "..", "data", "historical_production_data",
+    "2026_AGGREGATED_GENERATION_PER_TYPE_GENERATION_202512312300-202612312300.csv")
 )
 _jan_wind = _raw_2026[
     (_raw_2026["Production Type"] == "Wind Onshore")
@@ -468,7 +470,6 @@ def run_scenario(name, isolate=False, wind_series=None):
 # We subtract the baseline to get only the ADDITIONAL production from new capacity,
 # so we don't double-count wind that is already in the model's wind_mw feature.
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
 data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
 wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
 
@@ -639,7 +640,7 @@ axes[1, 1].grid(alpha=0.3, axis="y")
 
 plt.tight_layout()
 plt.savefig("stgnn_resilience.png", dpi=150, bbox_inches="tight")
-plt.show()
+plt.close()
 
 print("\n✓ Complete! Saved to stgnn_resilience.png")
 
@@ -661,8 +662,9 @@ results_df = pd.DataFrame(
         "supply_s4_p90": p90_s4,
     }
 )
-results_df.to_csv("../data/gnn_supply_scenarios_jan2026.csv", index=False)
-print("✓ Exported scenario quantiles to data/gnn_supply_scenarios_jan2026.csv")
+_out_csv = os.path.join(current_dir, "..", "data", "gnn_supply_scenarios_jan2026.csv")
+results_df.to_csv(_out_csv, index=False)
+print(f"✓ Exported scenario quantiles to {_out_csv}")
 """
 print("\n[6/6] Visualizing...")
 
@@ -778,6 +780,7 @@ results_df = pd.DataFrame(
         "supply_s4_p90": p90_s4,
     }
 )
-results_df.to_csv("../data/gnn_supply_scenarios_jan2026.csv", index=False)
-print("✓ Exported scenario quantiles to data/gnn_supply_scenarios_jan2026.csv")
+_out_csv = os.path.join(current_dir, "..", "data", "gnn_supply_scenarios_jan2026.csv")
+results_df.to_csv(_out_csv, index=False)
+print(f"✓ Exported scenario quantiles to {_out_csv}")
 """

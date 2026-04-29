@@ -15,4 +15,4 @@
 
 module load cuda/12.1
 
-python -u project/Supply.py
+python -u project/Supply_wind.py
