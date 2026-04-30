@@ -82,8 +82,7 @@ for col in essential_cols:
 
 freq_deviation = system_h["frequency"] - 50.0
 
-# Defined early because it is used for the available_energy lag below
-HORIZON = 24
+
 
 # Flow sign diagnostic
 print(
@@ -138,34 +137,30 @@ print(
 # EE node: full feature set
 # available_energy is lagged 24 h so the model can't trivially copy the most
 # recent balance value (which would overlap with the prediction window).
-ee_feats = pd.DataFrame(
-    {
-        # Autoregressive — no leakage, bare historik
-        "production_lag1": system_h["production"].shift(1),
-        "production_lag24": system_h["production"].shift(24),
-        "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
-        # Renewable komponenter — no leakage
-        "production_renewable": system_h["production_renewable"].shift(HORIZON),
-        "wind_mw": wind_mw,
-        # Market context
-        "flow_fi": flows_h[("ee", "fi")],
-        "flow_lv": flows_h[("ee", "lv")],
-        "price": prices_h["ee"],
-        # Weather
-        "temperature": weather_h["temperature"],
-        "wind_speed_10m": weather_h["wind_speed_10m"],
-        # Grid stress
-        "freq_deviation": freq_deviation,
-        # Calendar
-        "hour_sin": hour_sin,
-        "hour_cos": hour_cos,
-        "dow_sin": dow_sin,
-        "dow_cos": dow_cos,
-        "month_sin": month_sin,
-        "month_cos": month_cos,
-    },
-    index=idx,
-).fillna(0)
+
+# Defined early because it is used for the available_energy lag below
+HORIZON = 24
+ee_feats = pd.DataFrame({
+    
+    "production_lag1": system_h["production"].shift(1),
+    "production_lag24": system_h["production"].shift(HORIZON),
+    "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
+    "production_renewable": system_h["production_renewable"].shift(HORIZON),
+    
+    "flow_fi": flows_h[("ee", "fi")].shift(1), 
+    "flow_lv": flows_h[("ee", "lv")].shift(1),
+    "price": prices_h["ee"].shift(1),
+    
+
+    "temperature": weather_h["temperature"],
+    "wind_speed_10m": weather_h["wind_speed_10m"],
+    "wind_mw": wind_mw, 
+    
+    # Calendar (Static, always safe)
+    "hour_sin": hour_sin, "hour_cos": hour_cos,
+    "dow_sin": dow_sin, "dow_cos": dow_cos,
+    "month_sin": month_sin, "month_cos": month_cos,
+}, index=idx).fillna(0)
 
 
 fi_feats = (
@@ -223,7 +218,7 @@ print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 # ==================================================
 print("\n[2/6] Creating sequences...")
 
-SEQ_LEN = 168  # 1 week -- 1
+SEQ_LEN = 48  # 2 days
 
 y_target_values = system_h["production"].values  # production as target
 
@@ -235,11 +230,21 @@ for t in range(SEQ_LEN, len(node_data) - HORIZON):
 X = np.array(X_list, dtype=np.float32)
 y = np.array(y_list, dtype=np.float32)
 
+DIFF_LAG = 24
+y_levels   = y.copy()                       # keep originals for inversion
+y_diff     = y[DIFF_LAG:] - y[:-DIFF_LAG]  # differenced target
+X          = X[DIFF_LAG:]                   # align X with differenced y
+y_last     = y[:-DIFF_LAG]                  # level at t-DIFF_LAG (for inversion)
+y          = y_diff                         # model trains on differences
+
 jan2026_start = np.searchsorted(
-    idx[SEQ_LEN:-HORIZON], pd.Timestamp("2026-01-01", tz="UTC")
+    idx[SEQ_LEN + DIFF_LAG:-HORIZON], pd.Timestamp("2026-01-01", tz="UTC")
 )
-X_train_full, y_train_full = X[:jan2026_start], y[:jan2026_start]
-X_test, y_test = X[jan2026_start:], y[jan2026_start:]
+
+X_train_full,  y_train_full  = X[:jan2026_start],  y[:jan2026_start]
+X_test,        y_test        = X[jan2026_start:],  y[jan2026_start:]
+y_last_test                  = y_last[jan2026_start:]       # for inversion
+y_levels_test                = y_levels[DIFF_LAG + jan2026_start:]  # true absolute levels
 
 val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split], y_train_full[:val_split]
@@ -249,7 +254,7 @@ print(
     f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}"
 )
 
-scaler = ps.PowerScaler(X_train, y_train)
+scaler = ps.PowerScaler(X_train, y_train, diff_lag=DIFF_LAG)
 
 X_train_t = scaler.scale_x(X_train)
 X_val_t = scaler.scale_x(X_val)
@@ -267,13 +272,25 @@ edge_index = torch.tensor(
     dtype=torch.long,
 )
 
+edge_weight = torch.tensor([
+    abs(flows_h[("ee", "fi")].mean()),   # EE→FI
+    abs(flows_h[("ee", "fi")].mean()),   # FI→EE
+    abs(flows_h[("ee", "lv")].mean()),   # EE→LV
+    abs(flows_h[("ee", "lv")].mean()),   # LV→EE
+    abs(flows_h[("ee", "lv")].mean()),   # LV↔LT: proxy using EE→LV (no direct data)
+    abs(flows_h[("ee", "lv")].mean()),   # LT↔LV: same proxy
+], dtype=torch.float)
+
+edge_weight = edge_weight / edge_weight.max()
+
 device = torch.device(
     "cuda"
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
-model = STGNN(NUM_FEATURES, hidden_dim=32).to(device)
+model = STGNN(NUM_FEATURES, hidden_dim=32, seq_len=SEQ_LEN, dropout=0.3).to(device)
 edge_index = edge_index.to(device)
+edge_weight = edge_weight.to(device)  # move to same device as model
 x_std = scaler.x_std.to(device)
 
 print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}")
@@ -283,15 +300,15 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 # ==================================================
 print("\n[4/6] Training...")
 
-optimizer = torch.optim.Adam(model.parameters(), lr=5e-4, weight_decay=5e-3)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-2)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, patience=5, factor=0.5
+    optimizer, patience=8, factor=0.5
 )
 
 BATCH_SIZE = 256
-EPOCHS = 200
+EPOCHS = 50
 
-early_stopping = opt.EarlyStopping(patience=15, min_delta=1e-4, path="best_stgnn.pt")
+early_stopping = opt.EarlyStopping(patience=10, min_delta=1e-4, path="best_stgnn.pt")
 
 train_losses, val_losses = [], []
 
@@ -307,7 +324,7 @@ for epoch in range(EPOCHS):
         yb = y_train_t[idx_b].to(device)
 
         optimizer.zero_grad()
-        preds = model(xb, edge_index)
+        preds = model(xb, edge_index, edge_weight)
         loss = helper.quantile_loss(preds, yb)
 
         if torch.isnan(loss):
@@ -326,7 +343,7 @@ for epoch in range(EPOCHS):
         for i in range(0, len(X_val_t), BATCH_SIZE):
             xb_v = X_val_t[i : i + BATCH_SIZE].to(device)
             yb_v = y_val_t[i : i + BATCH_SIZE].to(device)
-            v_loss = helper.quantile_loss(model(xb_v, edge_index), yb_v)
+            v_loss = helper.quantile_loss(model(xb_v, edge_index, edge_weight), yb_v)
             val_losses_b.append(v_loss.item())
 
     avg_train_loss = epoch_loss / max(n_batches, 1)
@@ -358,14 +375,14 @@ print("\n[5/6] Evaluating on January 2026...")
 
 model.eval()
 with torch.no_grad():
-    test_preds = model(X_test_t.to(device), edge_index).cpu().numpy()
+    test_preds = model(X_test_t.to(device), edge_index, edge_weight).cpu().numpy()
 
 print(f"  Predictions generated for {len(test_preds)} samples.")
 
-p10 = scaler.inverse_y(test_preds[:, 0])
-p50 = scaler.inverse_y(test_preds[:, 1])
-p90 = scaler.inverse_y(test_preds[:, 2])
-actual = scaler.inverse_y(y_test_t.squeeze().numpy())
+p10 = scaler.inverse_y(test_preds[:, 0], last_level=y_last_test)
+p50 = scaler.inverse_y(test_preds[:, 1], last_level=y_last_test)
+p90 = scaler.inverse_y(test_preds[:, 2], last_level=y_last_test)
+actual = scaler.inverse_y(y_test_t.squeeze().numpy(), last_level=y_last_test)
 
 mae = np.mean(np.abs(p50 - actual))
 rmse = np.sqrt(np.mean((p50 - actual) ** 2))
@@ -389,72 +406,62 @@ def run_scenario(name, isolate=False, wind_series=None):
                  available_energy_lag24, and wind_mw using per-feature stds.
     """
     edges = edge_index.clone()
+    ew = edge_weight.clone()  # clone so we don't modify the global
     x_mod = X_test_t.clone().cpu()
+    lag1_std = x_std[0, 0, 0, PROD_LAG1_IDX].item()
 
     # sandra change
     if isolate:
-        # Self-loops only — EE plants can't react to FI/LV prices
-        edges = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long)
+        # Self-loops for all nodes to maintain GNN structure
+        edges = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long).to(device)
+        ew = torch.ones(4, device=device)
 
-        # Gem originale flows FØR nulstilling
-        fi_flow_orig = x_mod[:, :, 0, FLOW_FI_IDX].clone()
-        lv_flow_orig = x_mod[:, :, 0, FLOW_LV_IDX].clone()
+        # Calculate the missing energy (imports)
+        # Elering convention: negative flows = imports. 
+        # To isolate, we zero the flow but MUST increase production to compensate.
+        fi_import_delta = x_mod[:, :, 0, FLOW_FI_IDX].clone()
+        lv_import_delta = x_mod[:, :, 0, FLOW_LV_IDX].clone()
 
-        # Nulstil flows på alle relevante noder
+        # Zero out the flows
         x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
-        x_mod[:, :, 1, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
-        x_mod[:, :, 2, FLOW_LV_IDX] = 0.0
 
-        # Opdater available_energy_lag24 konsistent
-        # (ingen AVAIL_IDX da production ikke har available_energy som direkte feature)
-        x_mod[:, :, 0, AVAIL_LAG_IDX] += fi_flow_orig
-        x_mod[:, :, 0, AVAIL_LAG_IDX] += lv_flow_orig
+        # Increase production lags to tell the model: 
+        # "We are now in a high-production state because we have no imports."
+        # We subtract because imports are negative; -(-val) = +val.
+        x_mod[:, :, 0, PROD_LAG1_IDX] -= (fi_import_delta + lv_import_delta) / lag1_std
 
     if wind_series is not None:
-        # Sandra update
-        # wind_series is ADDITIONAL production from new farms (not in historical data).
-        # Each of the 4 affected features gets its own std for correct scaling.
-
+    # Use un-differenced training stds for injection scaling
         renew_std = x_std[0, 0, 0, RENEW_IDX].item()
         wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
-        lag1_std = x_std[0, 0, 0, PROD_LAG1_IDX].item()
-        # avail_std   = x_std[0, 0, 0, AVAIL_LAG_IDX].item() dont use
+        lag24_std = x_std[0, 0, 0, PROD_LAG24_IDX].item()
 
         for t in range(len(x_mod)):
-            w = wind_series[t : t + SEQ_LEN]
-            if len(w) == SEQ_LEN:
-                wt = torch.from_numpy(w.astype(np.float32))
+            # Get the wind delta for the specific SEQ_LEN window ending at t
+            # wind_series must be aligned so wind_series[t] corresponds to the 
+            # target hour we are predicting.
+            w_window = wind_series[t : t + SEQ_LEN]
+            
+            if len(w_window) == SEQ_LEN:
+                wt = torch.from_numpy(w_window.astype(np.float32))
 
-                # New wind farms directly increase renewable production
+                # 1. Update the "Now" features
                 x_mod[t, :, 0, RENEW_IDX] += wt / renew_std
-
-                # wind_mw represents ENTSOE-metered wind — new farms added here
                 x_mod[t, :, 0, WIND_MW_IDX] += wt / wind_mw_std
 
-                # production_lag1: if new farms are running now, they were also
-                # running 1 hour ago — update to keep features consistent
-                # we assume that if we have additional wind production in hour t, then we also had it in hour t-1, since the model sees lagged features. This is a simplification, but it allows us to keep the feature space consistent without needing to shift the wind series back by one hour, which would add complexity. The production_lag1 feature is important for the model's autoregressive understanding, so we update it to reflect the presence of new wind farms in both the current and previous hour.
+                # 2. Update the "Lags" 
+                # If the wind farm is part of the 'new normal', it affects the 
+                # model's view of what 'previous production' looks like.
                 x_mod[t, :, 0, PROD_LAG1_IDX] += wt / lag1_std
-
-                # available_energy_lag24: higher wind production also increases
-                # the lagged energy balance seen by the model
-                # x_mod[t, :, 0, AVAIL_LAG_IDX] += wt / avail_std
-
-            # Note: PROD_LAG24_IDX and AVAIL_LAG_IDX are intentionally NOT updated —
-            # both reflect yesterday's conditions when new wind farms did not yet exist.
-            # Updating one but not the other would create an internal inconsistency.
-
-            # SUPPLY_IDX (available_energy_lag24) is not adjusted here:
-            # it would require wind values shifted back 24h, adding complexity
-            # without material benefit since the target is production, not balance.
+                x_mod[t, :, 0, PROD_LAG24_IDX] += wt / lag24_std
 
     with torch.no_grad():
-        preds = model(x_mod.to(device), edges.to(device)).cpu().numpy()
+        preds = model(x_mod.to(device), edges.to(device), ew).cpu().numpy()
 
-    p10_s = scaler.inverse_y(preds[:, 0])
-    p50_s = scaler.inverse_y(preds[:, 1])
-    p90_s = scaler.inverse_y(preds[:, 2])
+    p10_s = scaler.inverse_y(preds[:, 0], last_level=y_last_test)
+    p50_s = scaler.inverse_y(preds[:, 1], last_level=y_last_test)
+    p90_s = scaler.inverse_y(preds[:, 2], last_level=y_last_test)
 
     if name:
         print(f"\n  {name}")
@@ -526,7 +533,7 @@ print("\n[6/6] Visualizing...")
 
 # Derive timestamps correctly from index (Supply_wind.py approach — more robust)
 _ts_start = SEQ_LEN + jan2026_start + HORIZON - 1
-jan_hours = idx[_ts_start : _ts_start + len(y_test)]
+jan_hours = idx[_ts_start : _ts_start + len(y_test)].to_numpy()
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 fig.suptitle(
@@ -665,122 +672,3 @@ results_df = pd.DataFrame(
 _out_csv = os.path.join(current_dir, "..", "data", "gnn_supply_scenarios_jan2026.csv")
 results_df.to_csv(_out_csv, index=False)
 print(f"✓ Exported scenario quantiles to {_out_csv}")
-"""
-print("\n[6/6] Visualizing...")
-
-# Derive actual prediction timestamps from the index rather than hardcoding Jan 1.
-# y_test[k] was built at loop t = SEQ_LEN + jan2026_start + k, targeting
-# idx[t + HORIZON - 1] = idx[SEQ_LEN + jan2026_start + k + HORIZON - 1].
-_ts_start = SEQ_LEN + jan2026_start + HORIZON - 1
-jan_hours = idx[_ts_start : _ts_start + len(y_test)]
-
-fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-fig.suptitle(
-    "ST-GNN: Estonian Energy Resilience — January 2026", fontsize=14, fontweight="bold"
-)
-
-# Plot 1: training curves
-axes[0, 0].plot(train_losses, label="Train", lw=2, color="steelblue")
-axes[0, 0].plot(val_losses, label="Val", lw=2, color="orange")
-axes[0, 0].set_title("Training & Validation Loss")
-axes[0, 0].set_xlabel("Epoch")
-axes[0, 0].set_ylabel("Quantile loss")
-axes[0, 0].legend()
-axes[0, 0].grid(alpha=0.3)
-
-# Plot 2: S1 forecast vs actual
-axes[0, 1].fill_between(
-    jan_hours, p10, p90, alpha=0.15, color="steelblue", label="P10–P90 band"
-)
-axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast")
-axes[0, 1].plot(
-    jan_hours, actual, lw=1.5, color="red", linestyle="--", label="Actual production"
-)
-axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
-axes[0, 1].set_ylabel("Production (MW)")
-axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
-axes[0, 1].legend(fontsize=8)
-axes[0, 1].grid(alpha=0.3)
-axes[0, 1].tick_params(axis="x", rotation=30)
-
-# Plot 3: scenario production over time
-axes[1, 0].plot(jan_hours, p50_s1, lw=2, color="green", label="S1: Full grid")
-axes[1, 0].plot(jan_hours, p50_s2, lw=2, color="red", label="S2: Full isolation")
-axes[1, 0].plot(
-    jan_hours, p50_s3, lw=1.5, color="orange", label="S3: Isolated + 323 MW"
-)
-axes[1, 0].plot(
-    jan_hours, p50_s4, lw=1.5, color="gold", label="S4: Isolated + 887 MW new"
-)
-axes[1, 0].set_title("Production by Scenario")
-axes[1, 0].set_ylabel("Production (MW)")
-axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
-axes[1, 0].legend(fontsize=8)
-axes[1, 0].grid(alpha=0.3)
-axes[1, 0].tick_params(axis="x", rotation=30)
-
-# Plot 4: mean production per scenario with P10–P90 range as error bars
-s_labels = ["S1\nFull grid", "S2\nIsolated", "S3\n+323 MW", "S4\n+887 MW"]
-s_colors = ["green", "red", "orange", "gold"]
-s_p50 = [p50_s1.mean(), p50_s2.mean(), p50_s3.mean(), p50_s4.mean()]
-s_err_lo = [
-    max(0.0, p50_s1.mean() - p10_s1.mean()),
-    max(0.0, p50_s2.mean() - p10_s2.mean()),
-    max(0.0, p50_s3.mean() - p10_s3.mean()),
-    max(0.0, p50_s4.mean() - p10_s4.mean()),
-]
-s_err_hi = [
-    max(0.0, p90_s1.mean() - p50_s1.mean()),
-    max(0.0, p90_s2.mean() - p50_s2.mean()),
-    max(0.0, p90_s3.mean() - p50_s3.mean()),
-    max(0.0, p90_s4.mean() - p50_s4.mean()),
-]
-
-x = np.arange(4)
-axes[1, 1].bar(x, s_p50, 0.5, color=s_colors, alpha=0.75)
-axes[1, 1].errorbar(
-    x,
-    s_p50,
-    yerr=[s_err_lo, s_err_hi],
-    fmt="none",
-    color="black",
-    capsize=6,
-    lw=1.5,
-    label="P10–P90 range",
-)
-axes[1, 1].set_xticks(x)
-axes[1, 1].set_xticklabels(s_labels, fontsize=9)
-axes[1, 1].set_ylabel("Mean production (MW)")
-axes[1, 1].set_title("Mean Production by Scenario  (error bars = P10–P90)")
-axes[1, 1].legend(fontsize=8)
-axes[1, 1].grid(alpha=0.3, axis="y")
-
-plt.tight_layout()
-plt.savefig("stgnn_resilience_wind.png", dpi=150, bbox_inches="tight")
-plt.show()
-
-print("\n✓ Complete! Saved to stgnn_resilience_wind.png")
-
-# Export all scenario quantiles so the resilience simulator can load them.
-# Stress test uses P10 supply (worst-case production) + P95 demand (ARIMA Monte Carlo).
-results_df = pd.DataFrame(
-    {
-        "timestamp": jan_hours,
-        "supply_s1_p10": p10_s1,
-        "supply_s1_p50": p50_s1,
-        "supply_s1_p90": p90_s1,
-        "supply_s2_p10": p10_s2,
-        "supply_s2_p50": p50_s2,
-        "supply_s2_p90": p90_s2,
-        "supply_s3_p10": p10_s3,
-        "supply_s3_p50": p50_s3,
-        "supply_s3_p90": p90_s3,
-        "supply_s4_p10": p10_s4,
-        "supply_s4_p50": p50_s4,
-        "supply_s4_p90": p90_s4,
-    }
-)
-_out_csv = os.path.join(current_dir, "..", "data", "gnn_supply_scenarios_jan2026.csv")
-results_df.to_csv(_out_csv, index=False)
-print(f"✓ Exported scenario quantiles to {_out_csv}")
-"""
