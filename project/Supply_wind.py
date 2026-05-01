@@ -142,14 +142,15 @@ print(
 HORIZON = 24
 ee_feats = pd.DataFrame({
     
-    "production_lag1": system_h["production"].shift(1),
+    "production": system_h["production"],
     "production_lag24": system_h["production"].shift(HORIZON),
+    "available_energy": system_h["available_energy"],
     "available_energy_lag24": system_h["available_energy"].shift(HORIZON),
-    "production_renewable": system_h["production_renewable"].shift(HORIZON),
+    "production_renewable": system_h["production_renewable"],
     
-    "flow_fi": flows_h[("ee", "fi")].shift(1), 
-    "flow_lv": flows_h[("ee", "lv")].shift(1),
-    "price": prices_h["ee"].shift(1),
+    "flow_fi": flows_h[("ee", "fi")], 
+    "flow_lv": flows_h[("ee", "lv")],
+    "price": prices_h["ee"],
     
 
     "temperature": weather_h["temperature"],
@@ -195,9 +196,9 @@ NUM_FEATURES = node_data.shape[2]
 FEATURE_NAMES = list(ee_feats.columns)
 
 # Autoregressive features
-PROD_LAG1_IDX = FEATURE_NAMES.index("production_lag1")
+PROD_IDX = FEATURE_NAMES.index("production")
 PROD_LAG24_IDX = FEATURE_NAMES.index("production_lag24")
-AVAIL_LAG_IDX = FEATURE_NAMES.index("available_energy_lag24")
+AVAIL_IDX = FEATURE_NAMES.index("available_energy")
 
 # Renewable / production features used in wind injection
 RENEW_IDX = FEATURE_NAMES.index("production_renewable")
@@ -216,39 +217,45 @@ print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 # ==================================================
 # STEP 2: SEQUENCES + SPLITS
 # ==================================================
-print("\n[2/6] Creating sequences (explicit 24h differencing)...")
+print("\n[2/6] Creating sequences...")
 
-SEQ_LEN = 48
-HORIZON = 24
+SEQ_LEN = 48  # 2 days
 
-y_target_values = system_h["production"].values
+y_target_values = system_h["production"].values  # production as target
 
 X_list, y_list = [], []
 for t in range(SEQ_LEN, len(node_data) - HORIZON):
     X_list.append(node_data[t - SEQ_LEN : t])
     y_list.append(y_target_values[t + HORIZON - 1])
 
-X = np.array(X_list, dtype=np.float32)   # (N, 48, 4, F)
-y = np.array(y_list, dtype=np.float32)   # (N,)
+X = np.array(X_list, dtype=np.float32)
+y = np.array(y_list, dtype=np.float32)
 
-print(f"X shape: {X.shape}, y shape: {y.shape}")
+DIFF_LAG = 24
+y_levels   = y.copy()                       # keep originals for inversion
+y_diff     = y[DIFF_LAG:] - y[:-DIFF_LAG]  # differenced target
+X          = X[DIFF_LAG:]                   # align X with differenced y
+y_last     = y[:-DIFF_LAG]                  # level at t-DIFF_LAG (for inversion)
+y          = y_diff                         # model trains on differences
 
-# No more DIFF_LAG – all arrays already aligned!
-# Now split as before, using the full length
-target_times = idx[SEQ_LEN + HORIZON - 1 : len(node_data)]   # length = N
-jan2026_start = np.searchsorted(target_times, pd.Timestamp("2026-01-01", tz="UTC"))
+jan2026_start = np.searchsorted(
+    idx[SEQ_LEN + DIFF_LAG:-HORIZON], pd.Timestamp("2026-01-01", tz="UTC")
+)
 
-X_train_full, y_train_full = X[:jan2026_start], y[:jan2026_start]
-X_test,       y_test       = X[jan2026_start:], y[jan2026_start:]
+X_train_full,  y_train_full  = X[:jan2026_start],  y[:jan2026_start]
+X_test,        y_test        = X[jan2026_start:],  y[jan2026_start:]
+y_last_test                  = y_last[jan2026_start:]       # for inversion
+y_levels_test                = y_levels[DIFF_LAG + jan2026_start:]  # true absolute levels
 
 val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split], y_train_full[:val_split]
-X_val,   y_val   = X_train_full[val_split:], y_train_full[val_split:]
+X_val, y_val = X_train_full[val_split:], y_train_full[val_split:]
 
-print(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}")
+print(
+    f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}"
+)
 
-
-scaler = ps.PowerScaler(X_train, y_train)
+scaler = ps.PowerScaler(X_train, y_train, diff_lag=DIFF_LAG)
 
 X_train_t = scaler.scale_x(X_train)
 X_val_t = scaler.scale_x(X_val)
@@ -282,7 +289,7 @@ device = torch.device(
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
-model = STGNN(NUM_FEATURES, hidden_dim=16, seq_len=SEQ_LEN, dropout=0.40).to(device)
+model = STGNN(NUM_FEATURES, hidden_dim=32, seq_len=SEQ_LEN, dropout=0.3).to(device)
 edge_index = edge_index.to(device)
 edge_weight = edge_weight.to(device)  # move to same device as model
 x_std = scaler.x_std.to(device)
@@ -294,13 +301,13 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 # ==================================================
 print("\n[4/6] Training...")
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-2)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-2)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, patience=10, factor=0.5
+    optimizer, patience=8, factor=0.5
 )
 
-BATCH_SIZE = 128
-EPOCHS = 150
+BATCH_SIZE = 256
+EPOCHS = 50
 
 early_stopping = opt.EarlyStopping(patience=10, min_delta=1e-4, path="best_stgnn.pt")
 
@@ -366,166 +373,121 @@ print(f"  Training complete. Best val loss: {early_stopping.best_loss:.4f}")
 # STEP 5: EVALUATE + SCENARIOS
 # ==================================================
 print("\n[5/6] Evaluating on January 2026...")
-
+ 
 model.eval()
 with torch.no_grad():
     test_preds = model(X_test_t.to(device), edge_index, edge_weight).cpu().numpy()
-
+ 
 print(f"  Predictions generated for {len(test_preds)} samples.")
-
-p10 = scaler.inverse_y(test_preds[:, 0])
-p50 = scaler.inverse_y(test_preds[:, 1])
-p90 = scaler.inverse_y(test_preds[:, 2])
-actual = scaler.inverse_y(y_test_t.squeeze().numpy())
-
-mae = np.mean(np.abs(p50 - actual))
-rmse = np.sqrt(np.mean((p50 - actual) ** 2))
+ 
+# Baseline model output (S1 = full grid, ingen manipulation)
+p10 = scaler.inverse_y(test_preds[:, 0], last_level=y_last_test)
+p50 = scaler.inverse_y(test_preds[:, 1], last_level=y_last_test)
+p90 = scaler.inverse_y(test_preds[:, 2], last_level=y_last_test)
+actual = scaler.inverse_y(y_test_t.squeeze().numpy(), last_level=y_last_test)
+ 
+mae      = np.mean(np.abs(p50 - actual))
+rmse     = np.sqrt(np.mean((p50 - actual) ** 2))
 coverage = np.mean((actual >= p10) & (actual <= p90))
-
+ 
 print(f"  MAE:              {mae:.1f} MW")
 print(f"  RMSE:             {rmse:.1f} MW")
-print(f"  P10-P90 coverage: {coverage * 100:.1f}%  (target ≥ 80%)")
-print(f"  Actual production range: {actual.min():.0f} – {actual.max():.0f} MW")
-
-
+print(f"  P10-P90 coverage: {coverage * 100:.1f}%  (target >= 80%)")
+ 
 # --------------------------------------------------
-# Scenario engine
+# Timestamps for januar 2026 test-periode
 # --------------------------------------------------
-def run_scenario(name, isolate=False, wind_series=None):
-    """
-    isolate:     remove ALL cross-border flows and increase production to compensate.
-    wind_series: np.array (T,) of ADDITIONAL hourly wind production in MW.
-    """
-    # 1. FIX: Keep the graph structure intact. Do not change edges/weights 
-    # to avoid Out-Of-Distribution (OOD) shock. We will just zero the flow features instead.
-    edges = edge_index.clone()
-    ew = edge_weight.clone() 
-    
-    # 2. FIX: Modify the RAW unscaled data (X_test), not the scaled data (X_test_t)
-    x_mod_raw = X_test.copy()
-    
-    # 3. FIX: Create a dynamic anchor for our differenced predictions
-    #scenario_anchor = y_test_t.copy()
-
-    if isolate:
-        # Extract actual MW flow values (Node 0 is EE)
-        fi_flows_mw = x_mod_raw[:, :, 0, FLOW_FI_IDX]
-        lv_flows_mw = x_mod_raw[:, :, 0, FLOW_LV_IDX]
-        
-        # Calculate total missing imports (negative values = imports, so clip at 0)
-        # We take the absolute value because we need to ADD this to production
-        missing_imports_mw = np.abs(np.clip(fi_flows_mw, a_min=None, a_max=0) + 
-                                    np.clip(lv_flows_mw, a_min=None, a_max=0))
-        
-        # Consistently update ALL relevant physical lags to reflect the "new normal"
-        x_mod_raw[:, :, 0, PROD_LAG1_IDX] += missing_imports_mw
-        x_mod_raw[:, :, 0, PROD_LAG24_IDX] += missing_imports_mw
-        x_mod_raw[:, :, 0, AVAIL_LAG_IDX] += missing_imports_mw
-        
-        # Zero out the flows safely
-        x_mod_raw[:, :, 0, FLOW_FI_IDX] = 0.0
-        x_mod_raw[:, :, 0, FLOW_LV_IDX] = 0.0
-        
-        # Adjust the anchor: Since we predict the difference from 24h ago, 
-        # our baseline 24h ago must reflect this higher production state.
-        #scenario_anchor += missing_imports_mw[:, -1]
-
-    if wind_series is not None:
-        # Align the injected wind target values with the final predictions
-        # wind_series is padded, we extract the exact values corresponding to the target hour
-        target_wind = wind_series[SEQ_LEN + HORIZON - 1 : SEQ_LEN + HORIZON - 1 ]#+ len(scenario_anchor)
-        
-        for t in range(len(x_mod_raw)):
-            w_window = wind_series[t : t + SEQ_LEN]
-
-            if len(w_window) == SEQ_LEN:
-                # Inject ONLY into renewable/wind capacity features.
-                # Adding wind to production lags causes mean-reversion: the model
-                # sees "production was already high" and predicts a smaller diff,
-                # which cancels the anchor boost and makes S2/S3 < S1.
-                x_mod_raw[t, :, 0, RENEW_IDX] += w_window
-                x_mod_raw[t, :, 0, WIND_MW_IDX] += w_window
-                
-        # Adjust the anchor: Add the injected wind to the baseline so the 
-        # inverse scaling doesn't pull the absolute production back down.
-        #if len(target_wind) == len(scenario_anchor):
-        #    scenario_anchor += target_wind
-
-    # Scale the physically adjusted data ONCE
-    x_mod_scaled = scaler.scale_x(x_mod_raw)
-    x_mod_tensor = x_mod_scaled.clone().detach().float().to(device)
-
-    # Generate predictions
-    model.eval()
-    with torch.no_grad():
-        preds = model(x_mod_tensor, edges.to(device), ew.to(device)).cpu().numpy()
-
-    # Invert using the dynamically adjusted scenario anchor!
-    p10_s = scaler.inverse_y(preds[:, 0])
-    p50_s = scaler.inverse_y(preds[:, 1])
-    p90_s = scaler.inverse_y(preds[:, 2])
-
-    if name:
-        print(f"\n  {name}")
-        print(f"    Median production (P50): {p50_s.mean():.0f} MW")
-        print(f"    P10 range:               {p10_s.min():.0f} – {p10_s.max():.0f} MW")
-        print(f"    P90 range:               {p90_s.min():.0f} – {p90_s.max():.0f} MW")
-
-    return p50_s, p10_s, p90_s
-
-# Load counterfactual wind production series for January 2026.
-# The CSV columns are TOTAL wind production (baseline 694 MW + new farms).
-# We subtract the baseline to get only the ADDITIONAL production from new capacity,
-# so we don't double-count wind that is already in the model's wind_mw feature.
-
-data_path = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
+_ts_start = SEQ_LEN + jan2026_start + HORIZON - 1
+jan_hours = idx[_ts_start : _ts_start + len(y_test)]   # DatetimeIndex
+ 
+# --------------------------------------------------
+# Import delta: hvad mister vi ved isolation?
+# Elering konvention: negative flow = EE importerer
+# Vi fratrækker KUN import (ikke eksport)
+# --------------------------------------------------
+fi_flow = flows_h[("ee", "fi")].reindex(jan_hours, method="ffill").fillna(0).values
+lv_flow = flows_h[("ee", "lv")].reindex(jan_hours, method="ffill").fillna(0).values
+ 
+"""
+import_delta = -(fi_flow + lv_flow)   # both export and import
+ 
+print(f"\n  Import delta (isolation):")
+print(f"    Mean: {import_delta.mean():.1f} MW/h tabt ved isolation")
+print(f"    Max:  {import_delta.max():.1f} MW/h")
+"""
+ 
+# --------------------------------------------------
+# Vind-scenarier: kun delta fra NYE vindfarme
+# --------------------------------------------------
+data_path     = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
 wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
-
-# Delta = new farms only (not total wind, which is already in the model's wind_mw feature).
-# Prepend SEQ_LEN zeros so X_test[0]'s input window (Dec 30–31) gets zero injection —
-# new farms don't exist in December. Without this, Jan 1 wind would be injected into
-# Dec 30-31 sequence positions (temporal misalignment).
-_pad = np.zeros(
-    SEQ_LEN
-)  # 48 nuller som prepends for at sikre korrekt tidsjustering af vindscenarierne (ingen injection i december)
-wind_scenA = np.concatenate(
-    [
-        _pad,
-        (wind_scenarios["wind_mwh_scenA"] - wind_scenarios["wind_mwh_baseline"]).values,
-    ]
+ 
+# Reindex til januar 2026 timestamps
+wind_scenA_delta = (
+    (wind_scenarios["wind_mwh_scenA"] - wind_scenarios["wind_mwh_baseline"])
+    .reindex(jan_hours, method="ffill")
+    .fillna(0)
+    .values
 )
-wind_scenB = np.concatenate(
-    [
-        _pad,
-        (wind_scenarios["wind_mwh_scenB"] - wind_scenarios["wind_mwh_baseline"]).values,
-    ]
+wind_scenB_delta = (
+    (wind_scenarios["wind_mwh_scenB"] - wind_scenarios["wind_mwh_baseline"])
+    .reindex(jan_hours, method="ffill")
+    .fillna(0)
+    .values
 )
+ 
+print(f"\n  Wind deltas:")
+print(f"    Scenario A mean: {wind_scenA_delta.mean():.1f} MW")
+print(f"    Scenario B mean: {wind_scenB_delta.mean():.1f} MW")
+ 
+# --------------------------------------------------
+# Byg scenarier via post-hoc justering
+# --------------------------------------------------
+# Usikkerhedsspænd fra modellen bevares i alle scenarier
+#spread_lo = p50 - p10   # nedre usikkerhed
+#spread_hi = p90 - p50   # øvre usikkerhed
+ 
+# Netto import til EE (positiv = EE modtager energi fra udlandet)
+# fi_flow negativ = EE importerer fra FI → vi vil have positiv værdi
+netto_import = -(fi_flow + lv_flow)   # mean ≈ +587 MW
 
+# S1: Fuld grid = produktion + hvad vi importerer netto
+p50_s1 = p50 + netto_import
+p10_s1 = p10 + netto_import           # bevar spread
+p90_s1 = p90 + netto_import
+
+# S2: Isolation = kun indenlandsk produktion (model output uændret)
+p50_s2, p10_s2, p90_s2 = p50.copy(), p10.copy(), p90.copy()
+
+# S3: Isolation + Scenario A vind
+p50_s3 = p50_s2 + wind_scenA_delta
+p10_s3 = p10_s2 + wind_scenA_delta
+p90_s3 = p90_s2 + wind_scenA_delta
+
+# S4: Isolation + Scenario B vind
+p50_s4 = p50_s2 + wind_scenB_delta
+p10_s4 = p10_s2 + wind_scenB_delta
+p90_s4 = p90_s2 + wind_scenB_delta
+
+# Clip til 0 — produktion kan ikke være negativ
+p10_s1 = np.maximum(p10_s1, 0)
+p10_s2 = np.maximum(p10_s2, 0)
+p10_s3 = np.maximum(p10_s3, 0)
+p10_s4 = np.maximum(p10_s4, 0)
 
 print("\n  --- Scenario comparison (January 2026) ---")
+for name, s_p50, s_p10, s_p90 in [
+    ("S1: Full grid (baseline)",              p50_s1, p10_s1, p90_s1),
+    ("S2: Isolated",                          p50_s2, p10_s2, p90_s2),
+    ("S3: Isolated + Scenario A (est. wind)", p50_s3, p10_s3, p90_s3),
+    ("S4: Isolated + Scenario B (pipeline)",  p50_s4, p10_s4, p90_s4),
+]:
+    print(f"\n  {name}")
+    print(f"    Mean P50: {s_p50.mean():.0f} MW  |  P10: {s_p10.mean():.0f}  |  P90: {s_p90.mean():.0f}")
+    print(f"    Min P50:  {s_p50.min():.0f} MW")
+ 
+jan_hours = jan_hours.to_numpy()   # konverter til numpy for plotting
 
-p50_s1, p10_s1, p90_s1 = run_scenario("S1: Full grid — all connections intact")
-
-p50_s2, p10_s2, p90_s2 = run_scenario(
-    "S2: Full isolation — no cross-border connections", isolate=True
-)
-
-p50_s3, p10_s3, p90_s3 = run_scenario(
-    "S3: Isolated + Scenario A (established wind plans)",
-    isolate=True,
-    wind_series=wind_scenA,
-)
-
-p50_s4, p10_s4, p90_s4 = run_scenario(
-    "S4: Isolated + Scenario B (pipeline wind farms)",
-    isolate=True,
-    wind_series=wind_scenB,
-)
-
-
-# ==================================================
-# STEP 6: VISUALIZE
-# ==================================================
 # combine plots from both codes:
 # ==================================================
 # STEP 6: VISUALIZE
@@ -550,15 +512,17 @@ axes[0, 0].set_ylabel("Quantile loss")
 axes[0, 0].legend()
 axes[0, 0].grid(alpha=0.3)
 
-# Plot 2: S1 forecast vs actual with uncertainty band
+# Plot 2: sammenlign model produktion (p50) med faktisk produktion
+# actual = hvad modellen blev trænet på (kun produktion, ikke import)
+# så p50 vs actual er stadig korrekt her
 axes[0, 1].fill_between(
     jan_hours, p10, p90, alpha=0.15, color="steelblue", label="P10–P90 band"
 )
-axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast")
+axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast (production)")
 axes[0, 1].plot(
     jan_hours, actual, lw=1.5, color="red", linestyle="--", label="Actual production"
 )
-axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
+axes[0, 1].set_title(f"Model Production Forecast vs Actual  (MAE = {mae:.0f} MW)")
 axes[0, 1].set_ylabel("Production (MW)")
 axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
 axes[0, 1].legend(fontsize=8)
@@ -583,8 +547,9 @@ axes[1, 0].fill_between(
     label="Cost of isolation (S1–S2)",
 )
 
-axes[1, 0].set_title("EE Production by Scenario — January 2026")
-axes[1, 0].set_ylabel("Production (MW)")
+# Plot 3 titel
+axes[1, 0].set_title("EE Available Energy by Scenario — January 2026")
+axes[1, 0].set_ylabel("Available energy (MW)")
 axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
 axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
@@ -641,8 +606,10 @@ axes[1, 1].axhline(
 
 axes[1, 1].set_xticks(x)
 axes[1, 1].set_xticklabels(s_labels, fontsize=9)
-axes[1, 1].set_ylabel("Mean production (MW)")
-axes[1, 1].set_title("Estonia's mean Production by Scenario  (error bars = P10–P90)")
+
+# Plot 4 titel  
+axes[1, 1].set_ylabel("Mean available energy (MW)")
+axes[1, 1].set_title("Mean Available Energy by Scenario  (error bars = P10–P90)")
 axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(alpha=0.3, axis="y")
 
@@ -653,23 +620,13 @@ plt.close()
 print("\n✓ Complete! Saved to stgnn_resilience.png")
 
 # Export scenario quantiles for Monte Carlo resilience simulation
-results_df = pd.DataFrame(
-    {
-        "timestamp": jan_hours,
-        "supply_s1_p10": p10_s1,
-        "supply_s1_p50": p50_s1,
-        "supply_s1_p90": p90_s1,
-        "supply_s2_p10": p10_s2,
-        "supply_s2_p50": p50_s2,
-        "supply_s2_p90": p90_s2,
-        "supply_s3_p10": p10_s3,
-        "supply_s3_p50": p50_s3,
-        "supply_s3_p90": p90_s3,
-        "supply_s4_p10": p10_s4,
-        "supply_s4_p50": p50_s4,
-        "supply_s4_p90": p90_s4,
-    }
-)
+results_df = pd.DataFrame({
+    "timestamp":     jan_hours,
+    "supply_s1_p10": p10_s1, "supply_s1_p50": p50_s1, "supply_s1_p90": p90_s1,
+    "supply_s2_p10": p10_s2, "supply_s2_p50": p50_s2, "supply_s2_p90": p90_s2,
+    "supply_s3_p10": p10_s3, "supply_s3_p50": p50_s3, "supply_s3_p90": p90_s3,
+    "supply_s4_p10": p10_s4, "supply_s4_p50": p50_s4, "supply_s4_p90": p90_s4,
+})
 _out_csv = os.path.join(current_dir, "..", "data", "gnn_supply_scenarios_jan2026.csv")
 results_df.to_csv(_out_csv, index=False)
-print(f"✓ Exported scenario quantiles to {_out_csv}")
+print(f"\n  Exported scenario quantiles to {_out_csv}")

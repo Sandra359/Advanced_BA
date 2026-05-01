@@ -2,10 +2,12 @@ import torch
 import numpy as np
 
 class PowerScaler:
-    def __init__(self, X_train, y_train):
+    def __init__(self, X_train, y_train, diff_lag=0):
         tx = torch.from_numpy(X_train) if isinstance(X_train, np.ndarray) else X_train
         ty = torch.from_numpy(y_train) if isinstance(y_train, np.ndarray) else y_train
-        
+
+        self.diff_lag = diff_lag  # stored so callers can use it for X alignment
+
         self.x_mean = tx.mean(dim=(0, 1), keepdim=True)
         self.x_std  = tx.std(dim=(0, 1),  keepdim=True) + 1e-7
         self.y_mean = ty.mean()
@@ -21,9 +23,11 @@ class PowerScaler:
             data = torch.from_numpy(data)
         return (data - self.y_mean) / self.y_std
 
-    def inverse_y(self, tensor):
-        """Undoes standardisation. """
+    def inverse_y(self, tensor, last_level=None):
+        """Undoes standardisation. If last_level provided, also undoes differencing."""
         result = tensor * float(self.y_std) + float(self.y_mean)
+        if last_level is not None:
+            result = result + last_level
         return result
 
     def inverse_x(self, tensor):
