@@ -216,45 +216,39 @@ print(f"  Features ({NUM_FEATURES}): {FEATURE_NAMES}")
 # ==================================================
 # STEP 2: SEQUENCES + SPLITS
 # ==================================================
-print("\n[2/6] Creating sequences...")
+print("\n[2/6] Creating sequences (explicit 24h differencing)...")
 
-SEQ_LEN = 48  # 2 days
+SEQ_LEN = 48
+HORIZON = 24
 
-y_target_values = system_h["production"].values  # production as target
+y_target_values = system_h["production"].values
 
 X_list, y_list = [], []
 for t in range(SEQ_LEN, len(node_data) - HORIZON):
     X_list.append(node_data[t - SEQ_LEN : t])
     y_list.append(y_target_values[t + HORIZON - 1])
 
-X = np.array(X_list, dtype=np.float32)
-y = np.array(y_list, dtype=np.float32)
+X = np.array(X_list, dtype=np.float32)   # (N, 48, 4, F)
+y = np.array(y_list, dtype=np.float32)   # (N,)
 
-DIFF_LAG = 24
-y_levels   = y.copy()                       # keep originals for inversion
-y_diff     = y[DIFF_LAG:] - y[:-DIFF_LAG]  # differenced target
-X          = X[DIFF_LAG:]                   # align X with differenced y
-y_last     = y[:-DIFF_LAG]                  # level at t-DIFF_LAG (for inversion)
-y          = y_diff                         # model trains on differences
+print(f"X shape: {X.shape}, y shape: {y.shape}")
 
-jan2026_start = np.searchsorted(
-    idx[SEQ_LEN + DIFF_LAG:-HORIZON], pd.Timestamp("2026-01-01", tz="UTC")
-)
+# No more DIFF_LAG – all arrays already aligned!
+# Now split as before, using the full length
+target_times = idx[SEQ_LEN + HORIZON - 1 : len(node_data)]   # length = N
+jan2026_start = np.searchsorted(target_times, pd.Timestamp("2026-01-01", tz="UTC"))
 
-X_train_full,  y_train_full  = X[:jan2026_start],  y[:jan2026_start]
-X_test,        y_test        = X[jan2026_start:],  y[jan2026_start:]
-y_last_test                  = y_last[jan2026_start:]       # for inversion
-y_levels_test                = y_levels[DIFF_LAG + jan2026_start:]  # true absolute levels
+X_train_full, y_train_full = X[:jan2026_start], y[:jan2026_start]
+X_test,       y_test       = X[jan2026_start:], y[jan2026_start:]
 
 val_split = int(len(X_train_full) * 0.8)
 X_train, y_train = X_train_full[:val_split], y_train_full[:val_split]
-X_val, y_val = X_train_full[val_split:], y_train_full[val_split:]
+X_val,   y_val   = X_train_full[val_split:], y_train_full[val_split:]
 
-print(
-    f"Train: {len(X_train):,} ({X_train.shape}) | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}"
-)
+print(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test (Jan 2026): {len(X_test):,}")
 
-scaler = ps.PowerScaler(X_train, y_train, diff_lag=DIFF_LAG)
+
+scaler = ps.PowerScaler(X_train, y_train)
 
 X_train_t = scaler.scale_x(X_train)
 X_val_t = scaler.scale_x(X_val)
@@ -288,7 +282,7 @@ device = torch.device(
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
-model = STGNN(NUM_FEATURES, hidden_dim=16, seq_len=SEQ_LEN, dropout=0.4).to(device)
+model = STGNN(NUM_FEATURES, hidden_dim=16, seq_len=SEQ_LEN, dropout=0.40).to(device)
 edge_index = edge_index.to(device)
 edge_weight = edge_weight.to(device)  # move to same device as model
 x_std = scaler.x_std.to(device)
@@ -302,10 +296,10 @@ print("\n[4/6] Training...")
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-2)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, patience=20, factor=0.5
+    optimizer, patience=10, factor=0.5
 )
 
-BATCH_SIZE = 256
+BATCH_SIZE = 128
 EPOCHS = 150
 
 early_stopping = opt.EarlyStopping(patience=10, min_delta=1e-4, path="best_stgnn.pt")
@@ -379,10 +373,10 @@ with torch.no_grad():
 
 print(f"  Predictions generated for {len(test_preds)} samples.")
 
-p10 = scaler.inverse_y(test_preds[:, 0], last_level=y_last_test)
-p50 = scaler.inverse_y(test_preds[:, 1], last_level=y_last_test)
-p90 = scaler.inverse_y(test_preds[:, 2], last_level=y_last_test)
-actual = scaler.inverse_y(y_test_t.squeeze().numpy(), last_level=y_last_test)
+p10 = scaler.inverse_y(test_preds[:, 0])
+p50 = scaler.inverse_y(test_preds[:, 1])
+p90 = scaler.inverse_y(test_preds[:, 2])
+actual = scaler.inverse_y(y_test_t.squeeze().numpy())
 
 mae = np.mean(np.abs(p50 - actual))
 rmse = np.sqrt(np.mean((p50 - actual) ** 2))
@@ -411,7 +405,7 @@ def run_scenario(name, isolate=False, wind_series=None):
     x_mod_raw = X_test.copy()
     
     # 3. FIX: Create a dynamic anchor for our differenced predictions
-    scenario_anchor = y_last_test.copy()
+    #scenario_anchor = y_test_t.copy()
 
     if isolate:
         # Extract actual MW flow values (Node 0 is EE)
@@ -434,12 +428,12 @@ def run_scenario(name, isolate=False, wind_series=None):
         
         # Adjust the anchor: Since we predict the difference from 24h ago, 
         # our baseline 24h ago must reflect this higher production state.
-        scenario_anchor += missing_imports_mw[:, -1]
+        #scenario_anchor += missing_imports_mw[:, -1]
 
     if wind_series is not None:
         # Align the injected wind target values with the final predictions
         # wind_series is padded, we extract the exact values corresponding to the target hour
-        target_wind = wind_series[SEQ_LEN + HORIZON - 1 : SEQ_LEN + HORIZON - 1 + len(scenario_anchor)]
+        target_wind = wind_series[SEQ_LEN + HORIZON - 1 : SEQ_LEN + HORIZON - 1 ]#+ len(scenario_anchor)
         
         for t in range(len(x_mod_raw)):
             w_window = wind_series[t : t + SEQ_LEN]
@@ -454,8 +448,8 @@ def run_scenario(name, isolate=False, wind_series=None):
                 
         # Adjust the anchor: Add the injected wind to the baseline so the 
         # inverse scaling doesn't pull the absolute production back down.
-        if len(target_wind) == len(scenario_anchor):
-            scenario_anchor += target_wind
+        #if len(target_wind) == len(scenario_anchor):
+        #    scenario_anchor += target_wind
 
     # Scale the physically adjusted data ONCE
     x_mod_scaled = scaler.scale_x(x_mod_raw)
@@ -467,9 +461,9 @@ def run_scenario(name, isolate=False, wind_series=None):
         preds = model(x_mod_tensor, edges.to(device), ew.to(device)).cpu().numpy()
 
     # Invert using the dynamically adjusted scenario anchor!
-    p10_s = scaler.inverse_y(preds[:, 0], last_level=scenario_anchor)
-    p50_s = scaler.inverse_y(preds[:, 1], last_level=scenario_anchor)
-    p90_s = scaler.inverse_y(preds[:, 2], last_level=scenario_anchor)
+    p10_s = scaler.inverse_y(preds[:, 0])
+    p50_s = scaler.inverse_y(preds[:, 1])
+    p90_s = scaler.inverse_y(preds[:, 2])
 
     if name:
         print(f"\n  {name}")
