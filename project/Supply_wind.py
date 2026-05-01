@@ -288,7 +288,7 @@ device = torch.device(
     if torch.cuda.is_available()
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
-model = STGNN(NUM_FEATURES, hidden_dim=32, seq_len=SEQ_LEN, dropout=0.3).to(device)
+model = STGNN(NUM_FEATURES, hidden_dim=16, seq_len=SEQ_LEN, dropout=0.4).to(device)
 edge_index = edge_index.to(device)
 edge_weight = edge_weight.to(device)  # move to same device as model
 x_std = scaler.x_std.to(device)
@@ -300,13 +300,13 @@ print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,} on {device}
 # ==================================================
 print("\n[4/6] Training...")
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-5, weight_decay=1e-2)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-2)
 scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, patience=8, factor=0.5
+    optimizer, patience=20, factor=0.5
 )
 
 BATCH_SIZE = 256
-EPOCHS = 50
+EPOCHS = 150
 
 early_stopping = opt.EarlyStopping(patience=10, min_delta=1e-4, path="best_stgnn.pt")
 
@@ -399,69 +399,77 @@ print(f"  Actual production range: {actual.min():.0f} – {actual.max():.0f} MW"
 # --------------------------------------------------
 def run_scenario(name, isolate=False, wind_series=None):
     """
-    isolate:     remove ALL cross-border edges and zero import flows
-    wind_series: np.array (T,) of ADDITIONAL hourly wind production in MW
-                 from NEW farms only (delta vs baseline, not total wind).
-                 Injected into production_renewable, production,
-                 available_energy_lag24, and wind_mw using per-feature stds.
+    isolate:     remove ALL cross-border flows and increase production to compensate.
+    wind_series: np.array (T,) of ADDITIONAL hourly wind production in MW.
     """
+    # 1. FIX: Keep the graph structure intact. Do not change edges/weights 
+    # to avoid Out-Of-Distribution (OOD) shock. We will just zero the flow features instead.
     edges = edge_index.clone()
-    ew = edge_weight.clone()  # clone so we don't modify the global
-    x_mod = X_test_t.clone().cpu()
-    lag1_std = x_std[0, 0, 0, PROD_LAG1_IDX].item()
+    ew = edge_weight.clone() 
+    
+    # 2. FIX: Modify the RAW unscaled data (X_test), not the scaled data (X_test_t)
+    x_mod_raw = X_test.copy()
+    
+    # 3. FIX: Create a dynamic anchor for our differenced predictions
+    scenario_anchor = y_last_test.copy()
 
-    # sandra change
     if isolate:
-        # Self-loops for all nodes to maintain GNN structure
-        edges = torch.tensor([[0, 1, 2, 3], [0, 1, 2, 3]], dtype=torch.long).to(device)
-        ew = torch.ones(4, device=device)
-
-        # Calculate the missing energy (imports)
-        # Elering convention: negative flows = imports. 
-        # To isolate, we zero the flow but MUST increase production to compensate.
-        fi_import_delta = x_mod[:, :, 0, FLOW_FI_IDX].clone()
-        lv_import_delta = x_mod[:, :, 0, FLOW_LV_IDX].clone()
-
-        # Zero out the flows
-        x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
-        x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
-
-        # Increase production lags to tell the model: 
-        # "We are now in a high-production state because we have no imports."
-        # We subtract because imports are negative; -(-val) = +val.
-        x_mod[:, :, 0, PROD_LAG1_IDX] -= (fi_import_delta + lv_import_delta) / lag1_std
+        # Extract actual MW flow values (Node 0 is EE)
+        fi_flows_mw = x_mod_raw[:, :, 0, FLOW_FI_IDX]
+        lv_flows_mw = x_mod_raw[:, :, 0, FLOW_LV_IDX]
+        
+        # Calculate total missing imports (negative values = imports, so clip at 0)
+        # We take the absolute value because we need to ADD this to production
+        missing_imports_mw = np.abs(np.clip(fi_flows_mw, a_min=None, a_max=0) + 
+                                    np.clip(lv_flows_mw, a_min=None, a_max=0))
+        
+        # Consistently update ALL relevant physical lags to reflect the "new normal"
+        x_mod_raw[:, :, 0, PROD_LAG1_IDX] += missing_imports_mw
+        x_mod_raw[:, :, 0, PROD_LAG24_IDX] += missing_imports_mw
+        x_mod_raw[:, :, 0, AVAIL_LAG_IDX] += missing_imports_mw
+        
+        # Zero out the flows safely
+        x_mod_raw[:, :, 0, FLOW_FI_IDX] = 0.0
+        x_mod_raw[:, :, 0, FLOW_LV_IDX] = 0.0
+        
+        # Adjust the anchor: Since we predict the difference from 24h ago, 
+        # our baseline 24h ago must reflect this higher production state.
+        scenario_anchor += missing_imports_mw[:, -1]
 
     if wind_series is not None:
-    # Use un-differenced training stds for injection scaling
-        renew_std = x_std[0, 0, 0, RENEW_IDX].item()
-        wind_mw_std = x_std[0, 0, 0, WIND_MW_IDX].item()
-        lag24_std = x_std[0, 0, 0, PROD_LAG24_IDX].item()
-
-        for t in range(len(x_mod)):
-            # Get the wind delta for the specific SEQ_LEN window ending at t
-            # wind_series must be aligned so wind_series[t] corresponds to the 
-            # target hour we are predicting.
+        # Align the injected wind target values with the final predictions
+        # wind_series is padded, we extract the exact values corresponding to the target hour
+        target_wind = wind_series[SEQ_LEN + HORIZON - 1 : SEQ_LEN + HORIZON - 1 + len(scenario_anchor)]
+        
+        for t in range(len(x_mod_raw)):
             w_window = wind_series[t : t + SEQ_LEN]
-            
+
             if len(w_window) == SEQ_LEN:
-                wt = torch.from_numpy(w_window.astype(np.float32))
+                # Inject ONLY into renewable/wind capacity features.
+                # Adding wind to production lags causes mean-reversion: the model
+                # sees "production was already high" and predicts a smaller diff,
+                # which cancels the anchor boost and makes S2/S3 < S1.
+                x_mod_raw[t, :, 0, RENEW_IDX] += w_window
+                x_mod_raw[t, :, 0, WIND_MW_IDX] += w_window
+                
+        # Adjust the anchor: Add the injected wind to the baseline so the 
+        # inverse scaling doesn't pull the absolute production back down.
+        if len(target_wind) == len(scenario_anchor):
+            scenario_anchor += target_wind
 
-                # 1. Update the "Now" features
-                x_mod[t, :, 0, RENEW_IDX] += wt / renew_std
-                x_mod[t, :, 0, WIND_MW_IDX] += wt / wind_mw_std
+    # Scale the physically adjusted data ONCE
+    x_mod_scaled = scaler.scale_x(x_mod_raw)
+    x_mod_tensor = x_mod_scaled.clone().detach().float().to(device)
 
-                # 2. Update the "Lags" 
-                # If the wind farm is part of the 'new normal', it affects the 
-                # model's view of what 'previous production' looks like.
-                x_mod[t, :, 0, PROD_LAG1_IDX] += wt / lag1_std
-                x_mod[t, :, 0, PROD_LAG24_IDX] += wt / lag24_std
-
+    # Generate predictions
+    model.eval()
     with torch.no_grad():
-        preds = model(x_mod.to(device), edges.to(device), ew).cpu().numpy()
+        preds = model(x_mod_tensor, edges.to(device), ew.to(device)).cpu().numpy()
 
-    p10_s = scaler.inverse_y(preds[:, 0], last_level=y_last_test)
-    p50_s = scaler.inverse_y(preds[:, 1], last_level=y_last_test)
-    p90_s = scaler.inverse_y(preds[:, 2], last_level=y_last_test)
+    # Invert using the dynamically adjusted scenario anchor!
+    p10_s = scaler.inverse_y(preds[:, 0], last_level=scenario_anchor)
+    p50_s = scaler.inverse_y(preds[:, 1], last_level=scenario_anchor)
+    p90_s = scaler.inverse_y(preds[:, 2], last_level=scenario_anchor)
 
     if name:
         print(f"\n  {name}")
@@ -470,7 +478,6 @@ def run_scenario(name, isolate=False, wind_series=None):
         print(f"    P90 range:               {p90_s.min():.0f} – {p90_s.max():.0f} MW")
 
     return p50_s, p10_s, p90_s
-
 
 # Load counterfactual wind production series for January 2026.
 # The CSV columns are TOTAL wind production (baseline 694 MW + new farms).
@@ -641,7 +648,7 @@ axes[1, 1].axhline(
 axes[1, 1].set_xticks(x)
 axes[1, 1].set_xticklabels(s_labels, fontsize=9)
 axes[1, 1].set_ylabel("Mean production (MW)")
-axes[1, 1].set_title("Mean Production by Scenario  (error bars = P10–P90)")
+axes[1, 1].set_title("Estonia's mean Production by Scenario  (error bars = P10–P90)")
 axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(alpha=0.3, axis="y")
 
