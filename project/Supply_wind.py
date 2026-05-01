@@ -426,10 +426,15 @@ def run_scenario(name, isolate=False, wind_series=None):
         x_mod[:, :, 0, FLOW_FI_IDX] = 0.0
         x_mod[:, :, 0, FLOW_LV_IDX] = 0.0
 
-        # Increase production lags to tell the model: 
+        # Increase production lags to tell the model:
         # "We are now in a high-production state because we have no imports."
-        # We subtract because imports are negative; -(-val) = +val.
-        x_mod[:, :, 0, PROD_LAG1_IDX] -= (fi_import_delta + lv_import_delta) / lag1_std
+        # fi_import_delta / lv_import_delta are in normalized units — convert back to
+        # MW first, then normalize into production units. Without this, the adjustment
+        # is ~200x too small and isolation has no effect on the model.
+        flow_fi_std = x_std[0, 0, 0, FLOW_FI_IDX].item()
+        flow_lv_std = x_std[0, 0, 0, FLOW_LV_IDX].item()
+        delta_mw = fi_import_delta * flow_fi_std + lv_import_delta * flow_lv_std
+        x_mod[:, :, 0, PROD_LAG1_IDX] -= delta_mw / lag1_std
 
     if wind_series is not None:
     # Use un-differenced training stds for injection scaling
