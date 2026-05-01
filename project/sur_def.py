@@ -30,6 +30,7 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from helper_functions_GNN import fetch_all, get_system_production
 
 SCENARIO_LABELS = {
     "s1": "S1: Full grid",
@@ -81,6 +82,7 @@ class ResilienceAnalysis:
         # Populated by load() / compute() / export_summary()
         self.supply  = None
         self.demand  = None
+        self.actual_demand = None 
         self.results = None
         self.summary = None
 
@@ -103,6 +105,10 @@ class ResilienceAnalysis:
         """Load and align supply + demand CSVs."""
         print("\n[1/3] Loading and aligning data...")
         self.supply, self.demand = self._load_and_align()
+        print("  Fetching actual surplus from Energinet API...")
+        df_system = fetch_all(get_system_production, start="2026-01-01", end="2026-02-01")
+        self.actual_demand = df_system["consumption"]
+        
         return self
 
     def compute(self):
@@ -150,8 +156,13 @@ class ResilienceAnalysis:
     def _load_and_align(self):
         supply    = pd.read_csv(self.supply_csv,    index_col=0, parse_dates=True)
         demand_mc = pd.read_csv(self.demand_mc_csv, index_col=0, parse_dates=True)
-
-        # Transpose if rows = simulations, cols = timesteps
+        demand_mc.index = pd.date_range(
+            start="2025-12-31 23:00:00",  # match your supply start
+            periods=len(demand_mc),
+            freq="h",  # 
+            tz="UTC"
+        )
+                # Transpose if rows = simulations, cols = timesteps
         if demand_mc.shape[0] < demand_mc.shape[1]:
             print(f"  Transposing demand MC: {demand_mc.shape} -> ", end="")
             demand_mc = demand_mc.T
@@ -298,6 +309,17 @@ class ResilienceAnalysis:
             ax.fill_between(idx, s_p25, s_p75, alpha=0.35, color=color,
                             label="P25-P75 surplus")
             ax.plot(idx, s_p50, color=color, lw=2.5, label="Median surplus")
+
+            #actual demand
+            if self.actual_demand is not None:
+                                # Supply P50 for dette scenarie minus faktisk demand
+                p50_vals = self.supply[f"supply_{sc}_p50"].values
+                actual_demand_aligned = self.actual_demand.reindex(idx).values
+                actual_sc_surplus = p50_vals - actual_demand_aligned
+                
+                ax.plot(idx, actual_sc_surplus,
+                        color="black", lw=2, linestyle="--",
+                        label="Supply P50 - Actual demand (Elering)", zorder=10)
             ax.axhline(0, color="red", lw=1.5, linestyle="--", alpha=0.8,
                        label="Break-even (0 MW)")
             ax.fill_between(idx, s_p05, np.minimum(s_p05, 0),
@@ -415,8 +437,8 @@ if __name__ == "__main__":
     _here = os.path.dirname(os.path.abspath(__file__))
 
     ra = ResilienceAnalysis(
-        supply_csv    = os.path.join(_here, "..", "data", "gnn_supply_scenarios1_jan2026.csv"),
-        demand_mc_csv = os.path.join(_here, "..", "data", "mc_simulation_lines_2026.csv"),
+        supply_csv    = os.path.join(_here, "..", "data", "gnn_supply_scenarios_jan2026.csv"),
+        demand_mc_csv = os.path.join(_here, "..", "data", "demand_mc_full_jan2026.csv"),
         figures_dir   = os.path.join(_here, "..", "figures"),
         data_dir      = os.path.join(_here, "..", "data"),
     )
