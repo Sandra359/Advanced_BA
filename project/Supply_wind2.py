@@ -407,12 +407,13 @@ jan_hours = idx[_ts_start : _ts_start + len(y_test)]   # DatetimeIndex
 fi_flow = flows_h[("ee", "fi")].reindex(jan_hours, method="ffill").fillna(0).values
 lv_flow = flows_h[("ee", "lv")].reindex(jan_hours, method="ffill").fillna(0).values
  
- 
+"""
 import_delta = -(fi_flow + lv_flow)   # both export and import
  
 print(f"\n  Import delta (isolation):")
 print(f"    Mean: {import_delta.mean():.1f} MW/h tabt ved isolation")
 print(f"    Max:  {import_delta.max():.1f} MW/h")
+"""
  
 # --------------------------------------------------
 # Vind-scenarier: kun delta fra NYE vindfarme
@@ -442,27 +443,37 @@ print(f"    Scenario B mean: {wind_scenB_delta.mean():.1f} MW")
 # Byg scenarier via post-hoc justering
 # --------------------------------------------------
 # Usikkerhedsspænd fra modellen bevares i alle scenarier
-spread_lo = p50 - p10   # nedre usikkerhed
-spread_hi = p90 - p50   # øvre usikkerhed
+#spread_lo = p50 - p10   # nedre usikkerhed
+#spread_hi = p90 - p50   # øvre usikkerhed
  
-# S1: Baseline
-p50_s1, p10_s1, p90_s1 = p50.copy(), p10.copy(), p90.copy()
- 
-# S2: Isolation — fratræk tabt import
-p50_s2 = p50 - import_delta
-p10_s2 = np.maximum(p50_s2 - spread_lo, 0)
-p90_s2 = p50_s2 + spread_hi
- 
+# Netto import til EE (positiv = EE modtager energi fra udlandet)
+# fi_flow negativ = EE importerer fra FI → vi vil have positiv værdi
+netto_import = -(fi_flow + lv_flow)   # mean ≈ +587 MW
+
+# S1: Fuld grid = produktion + hvad vi importerer netto
+p50_s1 = p50 + netto_import
+p10_s1 = p10 + netto_import           # bevar spread
+p90_s1 = p90 + netto_import
+
+# S2: Isolation = kun indenlandsk produktion (model output uændret)
+p50_s2, p10_s2, p90_s2 = p50.copy(), p10.copy(), p90.copy()
+
 # S3: Isolation + Scenario A vind
 p50_s3 = p50_s2 + wind_scenA_delta
-p10_s3 = np.maximum(p50_s3 - spread_lo, 0)
-p90_s3 = p50_s3 + spread_hi
- 
+p10_s3 = p10_s2 + wind_scenA_delta
+p90_s3 = p90_s2 + wind_scenA_delta
+
 # S4: Isolation + Scenario B vind
 p50_s4 = p50_s2 + wind_scenB_delta
-p10_s4 = np.maximum(p50_s4 - spread_lo, 0)
-p90_s4 = p50_s4 + spread_hi
- 
+p10_s4 = p10_s2 + wind_scenB_delta
+p90_s4 = p90_s2 + wind_scenB_delta
+
+# Clip til 0 — produktion kan ikke være negativ
+p10_s1 = np.maximum(p10_s1, 0)
+p10_s2 = np.maximum(p10_s2, 0)
+p10_s3 = np.maximum(p10_s3, 0)
+p10_s4 = np.maximum(p10_s4, 0)
+
 print("\n  --- Scenario comparison (January 2026) ---")
 for name, s_p50, s_p10, s_p90 in [
     ("S1: Full grid (baseline)",              p50_s1, p10_s1, p90_s1),
