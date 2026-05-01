@@ -443,13 +443,14 @@ def run_scenario(name, isolate=False, wind_series=None):
         
         for t in range(len(x_mod_raw)):
             w_window = wind_series[t : t + SEQ_LEN]
-            
+
             if len(w_window) == SEQ_LEN:
-                # Add raw MW directly to features
+                # Inject ONLY into renewable/wind capacity features.
+                # Adding wind to production lags causes mean-reversion: the model
+                # sees "production was already high" and predicts a smaller diff,
+                # which cancels the anchor boost and makes S2/S3 < S1.
                 x_mod_raw[t, :, 0, RENEW_IDX] += w_window
                 x_mod_raw[t, :, 0, WIND_MW_IDX] += w_window
-                x_mod_raw[t, :, 0, PROD_LAG1_IDX] += w_window
-                x_mod_raw[t, :, 0, PROD_LAG24_IDX] += w_window
                 
         # Adjust the anchor: Add the injected wind to the baseline so the 
         # inverse scaling doesn't pull the absolute production back down.
