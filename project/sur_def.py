@@ -415,7 +415,7 @@ if __name__ == "__main__":
     _here = os.path.dirname(os.path.abspath(__file__))
 
     ra = ResilienceAnalysis(
-        supply_csv    = os.path.join(_here, "..", "data", "gnn_supply_scenarios_jan2026.csv"),
+        supply_csv    = os.path.join(_here, "..", "data", "gnn_supply_scenarios1_jan2026.csv"),
         demand_mc_csv = os.path.join(_here, "..", "data", "mc_simulation_lines_2026.csv"),
         figures_dir   = os.path.join(_here, "..", "figures"),
         data_dir      = os.path.join(_here, "..", "data"),
