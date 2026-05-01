@@ -408,17 +408,7 @@ jan_hours = idx[_ts_start : _ts_start + len(y_test)]   # DatetimeIndex
 fi_flow = flows_h[("ee", "fi")].reindex(jan_hours, method="ffill").fillna(0).values
 lv_flow = flows_h[("ee", "lv")].reindex(jan_hours, method="ffill").fillna(0).values
  
-"""
-import_delta = -(fi_flow + lv_flow)   # both export and import
  
-print(f"\n  Import delta (isolation):")
-print(f"    Mean: {import_delta.mean():.1f} MW/h tabt ved isolation")
-print(f"    Max:  {import_delta.max():.1f} MW/h")
-"""
- 
-# --------------------------------------------------
-# Vind-scenarier: kun delta fra NYE vindfarme
-# --------------------------------------------------
 data_path     = os.path.join(current_dir, "..", "data", "wind_production_scenarios.csv")
 wind_scenarios = pd.read_csv(data_path, index_col=0, parse_dates=True)
  
@@ -440,15 +430,7 @@ print(f"\n  Wind deltas:")
 print(f"    Scenario A mean: {wind_scenA_delta.mean():.1f} MW")
 print(f"    Scenario B mean: {wind_scenB_delta.mean():.1f} MW")
  
-# --------------------------------------------------
-# Byg scenarier via post-hoc justering
-# --------------------------------------------------
-# Usikkerhedsspænd fra modellen bevares i alle scenarier
-#spread_lo = p50 - p10   # nedre usikkerhed
-#spread_hi = p90 - p50   # øvre usikkerhed
- 
-# Netto import til EE (positiv = EE modtager energi fra udlandet)
-# fi_flow negativ = EE importerer fra FI → vi vil have positiv værdi
+
 netto_import = -(fi_flow + lv_flow)   # mean ≈ +587 MW
 
 # S1: Fuld grid = produktion + hvad vi importerer netto
