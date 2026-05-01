@@ -511,15 +511,17 @@ axes[0, 0].set_ylabel("Quantile loss")
 axes[0, 0].legend()
 axes[0, 0].grid(alpha=0.3)
 
-# Plot 2: S1 forecast vs actual with uncertainty band
+# Plot 2: sammenlign model produktion (p50) med faktisk produktion
+# actual = hvad modellen blev trænet på (kun produktion, ikke import)
+# så p50 vs actual er stadig korrekt her
 axes[0, 1].fill_between(
     jan_hours, p10, p90, alpha=0.15, color="steelblue", label="P10–P90 band"
 )
-axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast")
+axes[0, 1].plot(jan_hours, p50, lw=2, color="steelblue", label="P50 forecast (production)")
 axes[0, 1].plot(
     jan_hours, actual, lw=1.5, color="red", linestyle="--", label="Actual production"
 )
-axes[0, 1].set_title(f"S1 Forecast vs Actual  (MAE = {mae:.0f} MW)")
+axes[0, 1].set_title(f"Model Production Forecast vs Actual  (MAE = {mae:.0f} MW)")
 axes[0, 1].set_ylabel("Production (MW)")
 axes[0, 1].set_xlim(jan_hours.min(), jan_hours.max())
 axes[0, 1].legend(fontsize=8)
@@ -544,8 +546,9 @@ axes[1, 0].fill_between(
     label="Cost of isolation (S1–S2)",
 )
 
-axes[1, 0].set_title("EE Production by Scenario — January 2026")
-axes[1, 0].set_ylabel("Production (MW)")
+# Plot 3 titel
+axes[1, 0].set_title("EE Available Energy by Scenario — January 2026")
+axes[1, 0].set_ylabel("Available energy (MW)")
 axes[1, 0].set_xlim(jan_hours.min(), jan_hours.max())
 axes[1, 0].legend(fontsize=8)
 axes[1, 0].grid(alpha=0.3)
@@ -602,8 +605,10 @@ axes[1, 1].axhline(
 
 axes[1, 1].set_xticks(x)
 axes[1, 1].set_xticklabels(s_labels, fontsize=9)
-axes[1, 1].set_ylabel("Mean production (MW)")
-axes[1, 1].set_title("Mean Production by Scenario  (error bars = P10–P90)")
+
+# Plot 4 titel  
+axes[1, 1].set_ylabel("Mean available energy (MW)")
+axes[1, 1].set_title("Mean Available Energy by Scenario  (error bars = P10–P90)")
 axes[1, 1].legend(fontsize=8)
 axes[1, 1].grid(alpha=0.3, axis="y")
 
