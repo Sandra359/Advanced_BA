@@ -931,6 +931,8 @@ def run_pipeline(
     lat: float = DEFAULT_LAT,
     lon: float = DEFAULT_LON,
     features: Sequence[str] = DEFAULT_FEATURES,
+    model_order: Optional[Tuple[int, int, int]] = None,
+    seasonal_model_order: Optional[Tuple[int, int, int, int]] = None,
     candidate_models: Sequence[
         Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = DEFAULT_CANDIDATE_MODELS,
@@ -949,6 +951,17 @@ def run_pipeline(
 
         from timeseries_module import run_pipeline
         result = run_pipeline(n_sims=1000, save_outputs=True)
+
+    To skip the expensive candidate search, provide both model orders directly:
+
+        result = run_pipeline(
+            model_order=(2, 0, 2),
+            seasonal_model_order=(1, 1, 1, 24),
+            n_sims=1000,
+        )
+
+    If either model_order or seasonal_model_order is omitted, the pipeline
+    tests all candidate_models and selects the best one as before.
 
     Then access results as:
 
@@ -984,30 +997,80 @@ def run_pipeline(
     if fill_known_missing:
         combined_dfs = fill_known_missing_values(combined_dfs)
 
-    all_results_df, _yearly_tables = fit_sarimax_candidates(
-        combined_dfs=combined_dfs,
-        features=features,
-        candidate_models=candidate_models,
-        train_years=train_years,
-        rank_metric=rank_metric,
-        verbose=verbose,
-    )
+    if (model_order is None) != (seasonal_model_order is None):
+        raise ValueError(
+            "Provide both model_order and seasonal_model_order, or omit both "
+            "to run candidate-model selection."
+        )
 
-    score_summary = summarize_model_scores(
-        all_results_df=all_results_df,
-        n_candidate_models=len(candidate_models),
-    )
+    if model_order is not None and seasonal_model_order is not None:
+        best_order = tuple(model_order)
+        best_seasonal_order = tuple(seasonal_model_order)
 
-    best_overall_model = score_summary.iloc[0]
-    best_order = best_overall_model["order"]
-    best_seasonal_order = best_overall_model["seasonal_order"]
+        # Candidate search is intentionally skipped when the user provides
+        # the SARIMAX orders directly. Keep these outputs empty but valid so
+        # PipelineResult has a consistent structure.
+        all_results_df = pd.DataFrame(
+            columns=[
+                "year",
+                "model_id",
+                "order",
+                "seasonal_order",
+                "AIC",
+                "BIC",
+                f"Ljung-Box p-value lag 24",
+                "converged",
+                "error",
+                "score",
+            ]
+        )
+        score_summary = pd.DataFrame(
+            [
+                {
+                    "order": best_order,
+                    "seasonal_order": best_seasonal_order,
+                    "total_score": np.nan,
+                    "mean_score": np.nan,
+                    "mean_AIC": np.nan,
+                    "mean_BIC": np.nan,
+                    "median_AIC": np.nan,
+                    "median_BIC": np.nan,
+                    "first_places": np.nan,
+                    "years_tested": 0,
+                }
+            ]
+        )
 
-    if verbose:
-        print("\nOverall SARIMAX model score across all years")
-        print(score_summary)
-        print("\nBest overall SARIMAX model:")
-        print(f"order = {best_order}")
-        print(f"seasonal_order = {best_seasonal_order}")
+        if verbose:
+            print("\nSkipping SARIMAX candidate search because model orders were provided.")
+            print(f"order = {best_order}")
+            print(f"seasonal_order = {best_seasonal_order}")
+
+    else:
+        all_results_df, _yearly_tables = fit_sarimax_candidates(
+            combined_dfs=combined_dfs,
+            features=features,
+            candidate_models=candidate_models,
+            train_years=train_years,
+            rank_metric=rank_metric,
+            verbose=verbose,
+        )
+
+        score_summary = summarize_model_scores(
+            all_results_df=all_results_df,
+            n_candidate_models=len(candidate_models),
+        )
+
+        best_overall_model = score_summary.iloc[0]
+        best_order = best_overall_model["order"]
+        best_seasonal_order = best_overall_model["seasonal_order"]
+
+        if verbose:
+            print("\nOverall SARIMAX model score across all years")
+            print(score_summary)
+            print("\nBest overall SARIMAX model:")
+            print(f"order = {best_order}")
+            print(f"seasonal_order = {best_seasonal_order}")
 
     fitted_models = fit_yearly_sarimax_models(
         combined_dfs=combined_dfs,
