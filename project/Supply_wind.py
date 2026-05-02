@@ -1,13 +1,13 @@
 import os
 import pickle
 import pandas as pd
-import helper_functions_GNN as helper
-from STGNN import STGNN
+import final_project.helper_functions_GNN as helper
+from final_project.STGNN import STGNN
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import power_scaler as ps
-import GNN_optimizer as opt
+import final_project.GNN_optimizer as opt
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
