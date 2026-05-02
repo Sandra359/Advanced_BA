@@ -5,32 +5,32 @@ Supply: GNN quantile forecasts (P10/P50/P90) for 4 scenarios (S1-S4)
 Demand: SARIMAX Monte Carlo ensemble saved as CSV
 
 Usage:
-    from resilience_analysis import ResilienceAnalysis
+    from sur_def import ResilienceAnalysis
 
     ra = ResilienceAnalysis(
         supply_csv    = "../data/gnn_supply_scenarios_jan2026.csv",
-        demand_mc_csv = "../data/mc_simulation_lines_2026.csv",
+        demand_mc_csv = "../data/demand_mc_full_jan2026.csv",
         figures_dir   = "../figures",
         data_dir      = "../data",
     )
-    ra.run()            # load → compute → plot → export (one call does everything)
-
-    # or step by step:
     ra.load()
     ra.compute()
-    ra.plot()
+    ra.plot()           # shows and saves all four figures
     ra.export_summary()
 
-    # access results afterwards:
+    # access results apltfterwards:
     ra.results["s1"]["deficit_risk"]
     ra.summary
 """
 
 import os
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from helper_functions_GNN import fetch_all, get_system_production
+
+warnings.filterwarnings("ignore")
 
 SCENARIO_LABELS = {
     "s1": "S1: Full grid",
@@ -55,7 +55,7 @@ class ResilienceAnalysis:
     Parameters
     ----------
     supply_csv    : path to gnn_supply_scenarios_jan2026.csv
-    demand_mc_csv : path to mc_simulation_lines_2026.csv
+    demand_mc_csv : path to demand_mc_full_jan2026.csv
     figures_dir   : directory where figures are saved  (default: ../figures)
     data_dir      : directory where summary CSV is saved (default: ../data)
     scenarios     : list of scenario keys, default ["s1","s2","s3","s4"]
@@ -79,12 +79,11 @@ class ResilienceAnalysis:
         os.makedirs(self.figures_dir, exist_ok=True)
         os.makedirs(self.data_dir,    exist_ok=True)
 
-        # Populated by load() / compute() / export_summary()
-        self.supply  = None
-        self.demand  = None
-        self.actual_demand = None 
-        self.results = None
-        self.summary = None
+        self.supply        = None
+        self.demand        = None
+        self.actual_demand = None
+        self.results       = None
+        self.summary       = None
 
     # --------------------------------------------------
     # PUBLIC API
@@ -92,9 +91,6 @@ class ResilienceAnalysis:
 
     def run(self):
         """Convenience: load → compute → plot → export in one call."""
-        print("=" * 60)
-        print("RESILIENCE ANALYSIS: Supply vs Demand")
-        print("=" * 60)
         self.load()
         self.compute()
         self.plot()
@@ -102,26 +98,18 @@ class ResilienceAnalysis:
         return self
 
     def load(self):
-        """Load and align supply + demand CSVs."""
-        print("\n[1/3] Loading and aligning data...")
         self.supply, self.demand = self._load_and_align()
-        print("  Fetching actual surplus from Energinet API...")
         df_system = fetch_all(get_system_production, start="2026-01-01", end="2026-02-01")
         self.actual_demand = df_system["consumption"]
-        
         return self
 
     def compute(self):
-        """Compute surplus and deficit risk for all scenarios."""
         self._check_loaded()
-        print("\n[2/3] Computing surplus and deficit risk...")
         self.results = self._compute_surplus_and_deficit()
         return self
 
     def plot(self):
-        """Generate all four figures and save to figures_dir."""
         self._check_computed()
-        print("\n[3/3] Plotting...")
         self._plot_supply_vs_demand()
         self._plot_mc_surplus_fan()
         self._plot_deficit_risk_and_surplus()
@@ -129,7 +117,6 @@ class ResilienceAnalysis:
         return self
 
     def export_summary(self):
-        """Build and save summary CSV to data_dir."""
         self._check_computed()
         self.summary = pd.DataFrame({
             sc: {
@@ -142,11 +129,8 @@ class ResilienceAnalysis:
             }
             for sc in self.scenarios
         }).T
-        print("\n  Summary table:")
-        print(self.summary.round(1).to_string())
         out = os.path.join(self.data_dir, "resilience_summary_table.csv")
         self.summary.to_csv(out)
-        print(f"\n  Saved {out}")
         return self
 
     # --------------------------------------------------
@@ -154,20 +138,18 @@ class ResilienceAnalysis:
     # --------------------------------------------------
 
     def _load_and_align(self):
-        supply    = pd.read_csv(self.supply_csv,    index_col=0, parse_dates=True)
-        demand_mc = pd.read_csv(self.demand_mc_csv, index_col=0, parse_dates=True)
+        supply    = pd.read_csv(self.supply_csv, index_col=0, parse_dates=True)
+        demand_mc = pd.read_csv(self.demand_mc_csv, index_col=0)
         demand_mc.index = pd.date_range(
-            start="2025-12-31 23:00:00",  # match your supply start
+            start="2025-12-31 23:00:00",
             periods=len(demand_mc),
-            freq="h",  # 
+            freq="h",
             tz="UTC"
         )
-                # Transpose if rows = simulations, cols = timesteps
+
         if demand_mc.shape[0] < demand_mc.shape[1]:
-            print(f"  Transposing demand MC: {demand_mc.shape} -> ", end="")
             demand_mc = demand_mc.T
             demand_mc.index = pd.to_datetime(demand_mc.index)
-            print(demand_mc.shape)
 
         if supply.index.tz is None:
             supply.index = supply.index.tz_localize("UTC")
@@ -182,21 +164,15 @@ class ResilienceAnalysis:
                 f"  Demand:  {demand_mc.index[0]} -> {demand_mc.index[-1]}"
             )
 
-        supply    = supply.loc[common_idx]
-        demand_mc = demand_mc.loc[common_idx]
-
-        print(f"  Aligned timestamps:  {len(common_idx)} hours")
-        print(f"  Supply columns:      {list(supply.columns)}")
-        print(f"  Demand simulations:  {demand_mc.shape[1]}")
-        return supply, demand_mc
+        return supply.loc[common_idx], demand_mc.loc[common_idx]
 
     # --------------------------------------------------
     # INTERNAL: COMPUTE
     # --------------------------------------------------
 
     def _compute_surplus_and_deficit(self):
-        demand_arr  = self.demand.values.astype(float)   # (n_hours, n_sims)
-        demand_mean = demand_arr.mean(axis=1)             # (n_hours,)
+        demand_arr  = self.demand.values.astype(float)
+        demand_mean = demand_arr.mean(axis=1)
         results = {}
 
         for sc in self.scenarios:
@@ -204,31 +180,19 @@ class ResilienceAnalysis:
             p50 = self.supply[f"supply_{sc}_p50"].values.astype(float)
             p90 = self.supply[f"supply_{sc}_p90"].values.astype(float)
 
-            # surplus_mat[t, sim] = supply_p50[t] - demand_sim[t]
-            surplus_mat        = p50[:, np.newaxis] - demand_arr   # (n_hours, n_sims)
+            surplus_mat        = p50[:, np.newaxis] - demand_arr
             deficit_risk       = np.mean(surplus_mat < 0, axis=1)
             shortfall          = np.where(surplus_mat < 0, -surplus_mat, 0.0)
             expected_shortfall = shortfall.mean(axis=1)
 
-            surplus_p50 = p50 - demand_mean
-            surplus_p10 = p10 - demand_mean
-            surplus_p90 = p90 - demand_mean
-
             results[sc] = {
-                "surplus_p50":        surplus_p50,
-                "surplus_p10":        surplus_p10,
-                "surplus_p90":        surplus_p90,
+                "surplus_p50":        p50 - demand_mean,
+                "surplus_p10":        p10 - demand_mean,
+                "surplus_p90":        p90 - demand_mean,
                 "surplus_mat":        surplus_mat,
                 "deficit_risk":       deficit_risk,
                 "expected_shortfall": expected_shortfall,
             }
-
-            print(f"\n  Scenario {sc.upper()}:")
-            print(f"    Mean deficit risk per hour:     {deficit_risk.mean()*100:.1f}%")
-            print(f"    Hours with >50% deficit risk:   {np.mean(deficit_risk>0.5)*100:.1f}%")
-            print(f"    Max deficit risk (single hour): {deficit_risk.max()*100:.1f}%")
-            print(f"    Mean surplus (P50 - mean dem):  {surplus_p50.mean():.0f} MW")
-            print(f"    Min surplus:                    {surplus_p50.min():.0f} MW")
 
         return results
 
@@ -240,12 +204,8 @@ class ResilienceAnalysis:
         return os.path.join(self.figures_dir, name)
 
     def _plot_supply_vs_demand(self):
-        """Figure 1: Supply P10/P50/P90 vs demand distribution."""
-        idx         = self.supply.index
-        demand_arr  = self.demand.values.astype(float)
-        demand_mean = demand_arr.mean(axis=1)
-        demand_q05  = np.percentile(demand_arr, 5,  axis=1)
-        demand_q95  = np.percentile(demand_arr, 95, axis=1)
+        idx        = self.supply.index
+        demand_arr = self.demand.values.astype(float)
 
         fig, axes = plt.subplots(len(self.scenarios), 1,
                                  figsize=(16, 4 * len(self.scenarios)), sharex=True)
@@ -254,15 +214,16 @@ class ResilienceAnalysis:
 
         for ax, sc in zip(axes, self.scenarios):
             color = SCENARIO_COLORS[sc]
-            ax.fill_between(idx, demand_q05, demand_q95,
+            ax.fill_between(idx,
+                            np.percentile(demand_arr, 5,  axis=1),
+                            np.percentile(demand_arr, 95, axis=1),
                             alpha=0.15, color="gray", label="Demand P5-P95")
-            ax.plot(idx, demand_mean, color="black", lw=1.5,
+            ax.plot(idx, demand_arr.mean(axis=1), color="black", lw=1.5,
                     linestyle="--", label="Demand mean")
             p10 = self.supply[f"supply_{sc}_p10"].values
             p50 = self.supply[f"supply_{sc}_p50"].values
             p90 = self.supply[f"supply_{sc}_p90"].values
-            ax.fill_between(idx, p10, p90, alpha=0.25, color=color,
-                            label="Supply P10-P90")
+            ax.fill_between(idx, p10, p90, alpha=0.25, color=color, label="Supply P10-P90")
             ax.plot(idx, p50, color=color, lw=2, label="Supply P50")
             ax.set_title(SCENARIO_LABELS[sc], fontsize=11)
             ax.set_ylabel("Power (MW)")
@@ -272,17 +233,10 @@ class ResilienceAnalysis:
 
         plt.suptitle("Supply vs Demand - January 2026", fontsize=14, fontweight="bold")
         plt.tight_layout()
-        fp = self._figpath("resilience_supply_vs_demand.png")
-        plt.savefig(fp, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved {fp}")
+        plt.savefig(self._figpath("resilience_supply_vs_demand.png"), dpi=150, bbox_inches="tight")
+        plt.show()
 
     def _plot_mc_surplus_fan(self):
-        """
-        Figure 2: MC surplus fan.
-        Each line = Supply P50 - one demand simulation.
-        Shows full demand-side uncertainty as spaghetti + percentile bands.
-        """
         idx = self.supply.index
         fig, axes = plt.subplots(len(self.scenarios), 1,
                                  figsize=(16, 4 * len(self.scenarios)), sharex=True)
@@ -291,7 +245,7 @@ class ResilienceAnalysis:
 
         for ax, sc in zip(axes, self.scenarios):
             color    = SCENARIO_COLORS[sc]
-            surp_mat = self.results[sc]["surplus_mat"]   # (n_hours, n_sims)
+            surp_mat = self.results[sc]["surplus_mat"]
 
             s_p05 = np.percentile(surp_mat, 5,  axis=1)
             s_p25 = np.percentile(surp_mat, 25, axis=1)
@@ -299,63 +253,44 @@ class ResilienceAnalysis:
             s_p75 = np.percentile(surp_mat, 75, axis=1)
             s_p95 = np.percentile(surp_mat, 95, axis=1)
 
-            # Spaghetti: all individual simulations
             for sim_i in range(surp_mat.shape[1]):
-                ax.plot(idx, surp_mat[:, sim_i],
-                        color=color, alpha=0.08, lw=0.6)
+                ax.plot(idx, surp_mat[:, sim_i], color=color, alpha=0.08, lw=0.6)
 
-            ax.fill_between(idx, s_p05, s_p95, alpha=0.20, color=color,
-                            label="P5-P95 surplus")
-            ax.fill_between(idx, s_p25, s_p75, alpha=0.35, color=color,
-                            label="P25-P75 surplus")
+            ax.fill_between(idx, s_p05, s_p95, alpha=0.20, color=color, label="P5-P95 surplus")
+            ax.fill_between(idx, s_p25, s_p75, alpha=0.35, color=color, label="P25-P75 surplus")
             ax.plot(idx, s_p50, color=color, lw=2.5, label="Median surplus")
 
-            #actual demand
             if self.actual_demand is not None:
-                                # Supply P50 for dette scenarie minus faktisk demand
                 p50_vals = self.supply[f"supply_{sc}_p50"].values
-                actual_demand_aligned = self.actual_demand.reindex(idx).values
-                actual_sc_surplus = p50_vals - actual_demand_aligned
-                
-                ax.plot(idx, actual_sc_surplus,
-                        color="black", lw=2, linestyle="--",
+                actual_sc_surplus = p50_vals - self.actual_demand.reindex(idx).values
+                ax.plot(idx, actual_sc_surplus, color="black", lw=2, linestyle="--",
                         label="Supply P50 - Actual demand (Elering)", zorder=10)
-            ax.axhline(0, color="red", lw=1.5, linestyle="--", alpha=0.8,
-                       label="Break-even (0 MW)")
-            ax.fill_between(idx, s_p05, np.minimum(s_p05, 0),
-                            where=(s_p05 < 0), color="red", alpha=0.12,
-                            label="Deficit zone (worst 5%)")
 
-            ax.set_title(
-                f"{SCENARIO_LABELS[sc]}  -  Supply P50 - each demand simulation",
-                fontsize=10)
+            ax.axhline(0, color="red", lw=1.5, linestyle="--", alpha=0.8, label="Break-even (0 MW)")
+            ax.fill_between(idx, s_p05, np.minimum(s_p05, 0),
+                            where=(s_p05 < 0), color="red", alpha=0.12, label="Deficit zone (worst 5%)")
+            ax.set_title(f"{SCENARIO_LABELS[sc]}  -  Supply P50 - each demand simulation", fontsize=10)
             ax.set_ylabel("Surplus (MW)")
             ax.legend(fontsize=7, loc="upper right", ncol=2)
             ax.grid(alpha=0.3)
             ax.tick_params(axis="x", rotation=30)
 
-        plt.suptitle(
-            "MC Surplus Fan - Uncertainty from Demand Simulations\n"
-            "(each line = Supply P50 - one simulated demand path)",
-            fontsize=13, fontweight="bold")
+        plt.suptitle("MC Surplus Fan - Uncertainty from Demand Simulations\n"
+                     "(each line = Supply P50 - one simulated demand path)",
+                     fontsize=13, fontweight="bold")
         plt.tight_layout()
-        fp = self._figpath("resilience_mc_surplus_fan.png")
-        plt.savefig(fp, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved {fp}")
+        plt.savefig(self._figpath("resilience_mc_surplus_fan.png"), dpi=150, bbox_inches="tight")
+        plt.show()
 
     def _plot_deficit_risk_and_surplus(self):
-        """Figure 3: Deficit risk + surplus P50 over time, all scenarios overlaid."""
         idx = self.supply.index
         fig, axes = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
 
         for sc in self.scenarios:
             r     = self.results[sc]
             color = SCENARIO_COLORS[sc]
-            axes[0].plot(idx, r["deficit_risk"] * 100,
-                         color=color, lw=1.5, label=SCENARIO_LABELS[sc])
-            axes[1].plot(idx, r["surplus_p50"],
-                         color=color, lw=1.5, label=SCENARIO_LABELS[sc])
+            axes[0].plot(idx, r["deficit_risk"] * 100, color=color, lw=1.5, label=SCENARIO_LABELS[sc])
+            axes[1].plot(idx, r["surplus_p50"],         color=color, lw=1.5, label=SCENARIO_LABELS[sc])
 
         axes[0].axhline(50, color="black", lw=1, linestyle=":", label="50% threshold")
         axes[0].set_ylabel("Deficit risk (%)")
@@ -373,21 +308,17 @@ class ResilienceAnalysis:
 
         plt.suptitle("Resilience Analysis - January 2026", fontsize=14, fontweight="bold")
         plt.tight_layout()
-        fp = self._figpath("resilience_deficit_risk.png")
-        plt.savefig(fp, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved {fp}")
+        plt.savefig(self._figpath("resilience_deficit_risk.png"), dpi=150, bbox_inches="tight")
+        plt.show()
 
     def _plot_summary_bars(self):
-        """Figure 4: Summary bar charts - mean deficit risk and mean surplus."""
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
         sc_colors    = [SCENARIO_COLORS[sc]                           for sc in self.scenarios]
         mean_risks   = [self.results[sc]["deficit_risk"].mean() * 100 for sc in self.scenarios]
         mean_surplus = [self.results[sc]["surplus_p50"].mean()        for sc in self.scenarios]
 
-        axes[0].bar(range(len(self.scenarios)), mean_risks,
-                    color=sc_colors, alpha=0.85, edgecolor="white")
+        axes[0].bar(range(len(self.scenarios)), mean_risks, color=sc_colors, alpha=0.85, edgecolor="white")
         axes[0].set_xticks(range(len(self.scenarios)))
         axes[0].set_xticklabels([sc.upper() for sc in self.scenarios])
         axes[0].set_ylabel("Mean hourly deficit risk (%)")
@@ -396,8 +327,7 @@ class ResilienceAnalysis:
             axes[0].text(i, v + 0.3, f"{v:.1f}%", ha="center", fontsize=9)
         axes[0].grid(alpha=0.3, axis="y")
 
-        axes[1].bar(range(len(self.scenarios)), mean_surplus,
-                    color=sc_colors, alpha=0.85, edgecolor="white")
+        axes[1].bar(range(len(self.scenarios)), mean_surplus, color=sc_colors, alpha=0.85, edgecolor="white")
         axes[1].axhline(0, color="black", lw=1.5)
         axes[1].set_xticks(range(len(self.scenarios)))
         axes[1].set_xticklabels([sc.upper() for sc in self.scenarios])
@@ -410,10 +340,8 @@ class ResilienceAnalysis:
 
         plt.suptitle("Scenario Comparison Summary", fontsize=14, fontweight="bold")
         plt.tight_layout()
-        fp = self._figpath("resilience_summary.png")
-        plt.savefig(fp, dpi=150, bbox_inches="tight")
-        plt.close()
-        print(f"  Saved {fp}")
+        plt.savefig(self._figpath("resilience_summary.png"), dpi=150, bbox_inches="tight")
+        plt.show()
 
     # --------------------------------------------------
     # GUARDS
